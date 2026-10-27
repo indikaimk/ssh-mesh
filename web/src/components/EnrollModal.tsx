@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Copy, Check, ShieldCheck, Server, Key, Plus, Trash2, Clock } from 'lucide-react';
+import { X, Copy, Check, ShieldCheck, Server, Key, Plus, Trash2, Clock, Download } from 'lucide-react';
 import { EnrollmentToken } from '../types';
 
 interface EnrollModalProps {
@@ -60,7 +60,7 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
 
   const tokenParam = selectedToken ? `?token=${encodeURIComponent(selectedToken)}` : '';
   const curlCmd = `curl -sSL ${httpScheme}://${host}/api/v1/install-script${tokenParam} | sudo bash`;
-  const binaryCmd = `./bin/ssh-mesh-agent -server ${wsScheme}://${host}/api/v1/agent/tunnel -token ${selectedToken || defaultToken}`;
+  const binaryCmd = `chmod +x ssh-mesh-agent-* && ./ssh-mesh-agent-* -server ${wsScheme}://${host}/api/v1/agent/tunnel -token ${selectedToken || defaultToken}`;
 
   const handleCopy = (text: string, type: 'curl' | 'binary') => {
     navigator.clipboard.writeText(text);
@@ -210,11 +210,16 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
             )}
 
             <div>
-              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '6px' }}>
-                Option 1: Quick Install Script (Linux VPS)
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                  Option 1: One-Line Auto-Installer (Recommended)
+                </div>
+                <span className="badge-tag" style={{ color: '#10b981', borderColor: 'rgba(16, 185, 129, 0.3)' }}>
+                  Auto-Detects OS & Arch
+                </span>
               </div>
               <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '8px' }}>
-                Downloads the agent and creates a background systemd service:
+                Detects architecture, downloads static agent to <code style={{ color: 'var(--accent-cyan)' }}>/usr/local/bin</code>, and configures a systemd background service:
               </p>
               <div className="code-block">
                 <code>{curlCmd}</code>
@@ -231,11 +236,85 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
 
             <div>
               <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '6px' }}>
-                Option 2: Direct Binary Execution (Testing / Dev)
+                Option 2: Pre-Compiled Static Binaries (Self-Contained)
               </div>
-              <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '8px' }}>
-                Run the agent binary directly from your terminal:
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '10px' }}>
+                Download pure static binaries compiled with <code style={{ color: 'var(--accent-cyan)' }}>CGO_ENABLED=0</code> without external libc dependencies:
               </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '10px', marginBottom: '12px' }}>
+                {[
+                  {
+                    name: 'Linux x86_64',
+                    os: 'linux',
+                    arch: 'amd64',
+                    badge: 'amd64',
+                    desc: 'Ubuntu, Debian, RHEL, Alpine, Cloud VPS',
+                    size: '6.8 MB',
+                  },
+                  {
+                    name: 'Linux ARM64',
+                    os: 'linux',
+                    arch: 'arm64',
+                    badge: 'arm64',
+                    desc: 'AWS Graviton, Raspberry Pi 4+, Oracle ARM',
+                    size: '6.2 MB',
+                  },
+                  {
+                    name: 'macOS Apple Silicon',
+                    os: 'darwin',
+                    arch: 'arm64',
+                    badge: 'arm64',
+                    desc: 'Apple Silicon M1 / M2 / M3 / M4 Macs',
+                    size: '6.4 MB',
+                  },
+                  {
+                    name: 'macOS Intel',
+                    os: 'darwin',
+                    arch: 'amd64',
+                    badge: 'amd64',
+                    desc: 'Intel-based Mac hardware',
+                    size: '6.9 MB',
+                  },
+                ].map((b) => (
+                  <div
+                    key={`${b.os}-${b.arch}`}
+                    style={{
+                      background: 'var(--bg-primary)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: '8px',
+                      padding: '10px 12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '8px',
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>{b.name}</span>
+                        <span className="badge-tag" style={{ fontSize: '0.65rem', padding: '1px 5px' }}>{b.badge}</span>
+                      </div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: '2px' }}>
+                        {b.desc} &bull; {b.size}
+                      </div>
+                    </div>
+                    <a
+                      href={`/api/v1/download/agent?os=${b.os}&arch=${b.arch}`}
+                      download={`ssh-mesh-agent-${b.os}-${b.arch}`}
+                      className="btn btn-secondary btn-sm"
+                      style={{ padding: '6px 10px', flexShrink: 0 }}
+                      title={`Download ${b.name} binary`}
+                    >
+                      <Download size={13} />
+                      <span style={{ fontSize: '0.75rem' }}>Download</span>
+                    </a>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', marginBottom: '6px' }}>
+                Run manually after downloading:
+              </div>
               <div className="code-block">
                 <code>{binaryCmd}</code>
                 <button
@@ -263,7 +342,7 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
             >
               <ShieldCheck size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
               <div>
-                <strong>Zero Inbound Firewall Exposure</strong>: The agent initiates an outbound reverse tunnel. No open port 22 or public IP required.
+                <strong>Zero Inbound Firewall Exposure</strong>: The agent initiates an outbound reverse tunnel. No open port 22 or public IP required on the host.
               </div>
             </div>
           </div>

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,6 +36,7 @@ func (api *ServerAPI) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/auth/login", api.handleLogin)
 	mux.HandleFunc("/api/v1/health", api.handleHealth)
 	mux.HandleFunc("/api/v1/install-script", api.handleInstallScript)
+	mux.HandleFunc("/api/v1/download/agent", api.handleDownloadAgent)
 
 	// Protected routes (require JWT)
 	mux.Handle("/api/v1/auth/me", api.authMgr.Middleware(http.HandlerFunc(api.handleMe)))
@@ -258,6 +261,48 @@ func (api *ServerAPI) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (api *ServerAPI) handleDownloadAgent(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	osName := strings.ToLower(r.URL.Query().Get("os"))
+	if osName == "" {
+		osName = "linux"
+	}
+
+	archName := strings.ToLower(r.URL.Query().Get("arch"))
+	if archName == "" {
+		archName = "amd64"
+	}
+	switch archName {
+	case "x86_64", "x64":
+		archName = "amd64"
+	case "aarch64", "arm":
+		archName = "arm64"
+	}
+
+	candidates := []string{
+		filepath.Join("bin/dist", fmt.Sprintf("ssh-mesh-agent-%s-%s", osName, archName)),
+		filepath.Join("bin", fmt.Sprintf("ssh-mesh-agent-%s-%s", osName, archName)),
+		filepath.Join("bin", "ssh-mesh-agent"),
+	}
+
+	var foundPath string
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			foundPath = p
+			break
+		}
+	}
+
+	if foundPath == "" {
+		http.Error(w, fmt.Sprintf("agent binary not found for os=%s arch=%s", osName, archName), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"ssh-mesh-agent-%s-%s\"", osName, archName))
+	http.ServeFile(w, r, foundPath)
+}
+
 func (api *ServerAPI) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript")
 
@@ -266,12 +311,15 @@ func (api *ServerAPI) handleInstallScript(w http.ResponseWriter, r *http.Request
 		host = r.Host
 	}
 
-	scheme := "ws"
+	httpScheme := "http"
+	wsScheme := "ws"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "wss"
+		httpScheme = "https"
+		wsScheme = "wss"
 	}
 
-	tunnelURL := fmt.Sprintf("%s://%s/api/v1/agent/tunnel", scheme, host)
+	serverHTTP := fmt.Sprintf("%s://%s", httpScheme, host)
+	tunnelURL := fmt.Sprintf("%s://%s/api/v1/agent/tunnel", wsScheme, host)
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		// Use first active token or default
@@ -288,26 +336,49 @@ func (api *ServerAPI) handleInstallScript(w http.ResponseWriter, r *http.Request
 	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 
-echo "========================================================"
-echo "          SSH-Mesh Agent Installer                      "
-echo "========================================================"
+echo "=========================================================="
+echo "          SSH-Mesh Agent Installer                        "
+echo "=========================================================="
 
 INSTALL_DIR="/usr/local/bin"
 SERVICE_FILE="/etc/systemd/system/ssh-mesh-agent.service"
-SERVER_URL="%s"
+SERVER_HTTP="%s"
+SERVER_TUNNEL="%s"
 TOKEN="%s"
 
-echo "[1/3] Target control plane: ${SERVER_URL}"
+echo "[1/3] Detecting platform architecture..."
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "${ARCH}" in
+  x86_64|amd64)
+    ARCH="amd64"
+    ;;
+  aarch64|arm64)
+    ARCH="arm64"
+    ;;
+  *)
+    echo "Error: Unsupported architecture '${ARCH}'"
+    exit 1
+    ;;
+esac
 
-cat << 'EOF' > /tmp/ssh-mesh-agent-run.sh
-#!/usr/bin/env bash
-exec /usr/local/bin/ssh-mesh-agent \
-  -server "%s" \
-  -token "%s"
-EOF
-chmod +x /tmp/ssh-mesh-agent-run.sh
+DOWNLOAD_URL="${SERVER_HTTP}/api/v1/download/agent?os=${OS}&arch=${ARCH}"
+echo "Downloading agent binary for ${OS}/${ARCH}..."
 
-echo "[2/3] Setting up systemd background service..."
+mkdir -p "${INSTALL_DIR}"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "${DOWNLOAD_URL}" -o "${INSTALL_DIR}/ssh-mesh-agent"
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "${INSTALL_DIR}/ssh-mesh-agent" "${DOWNLOAD_URL}"
+else
+  echo "Error: curl or wget is required to install the agent."
+  exit 1
+fi
+
+chmod +x "${INSTALL_DIR}/ssh-mesh-agent"
+echo "Binary installed to ${INSTALL_DIR}/ssh-mesh-agent"
+
+echo "[2/3] Configuring systemd background service..."
 if [ -d "/etc/systemd/system" ]; then
   cat << EOF > ${SERVICE_FILE}
 [Unit]
@@ -316,7 +387,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ssh-mesh-agent -server "${SERVER_URL}" -token "${TOKEN}"
+ExecStart=${INSTALL_DIR}/ssh-mesh-agent -server "${SERVER_TUNNEL}" -token "${TOKEN}"
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -324,15 +395,20 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
-  echo "[3/3] Service created at ${SERVICE_FILE}."
-  echo "Run: systemctl daemon-reload && systemctl enable --now ssh-mesh-agent"
+
+  systemctl daemon-reload
+  systemctl enable --now ssh-mesh-agent
+  echo "[3/3] Service created and started: ssh-mesh-agent"
+  echo "Node is now connected to ${SERVER_TUNNEL}!"
 else
-  echo "[3/3] Systemd not found. You can run the agent manually:"
-  echo "ssh-mesh-agent -server '${SERVER_URL}' -token '${TOKEN}'"
+  echo "[3/3] Systemd not found. You can run the agent in the background:"
+  echo "nohup ${INSTALL_DIR}/ssh-mesh-agent -server '${SERVER_TUNNEL}' -token '${TOKEN}' > /tmp/ssh-mesh-agent.log 2>&1 &"
 fi
 
-echo "Installation complete."
-`, tunnelURL, token, tunnelURL, token)
+echo "=========================================================="
+echo "  Installation Complete!"
+echo "=========================================================="
+`, serverHTTP, tunnelURL, token)
 
 	_, _ = w.Write([]byte(strings.TrimSpace(script) + "\n"))
 }
