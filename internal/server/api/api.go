@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 )
@@ -101,7 +102,17 @@ func (api *ServerAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agents := api.broker.List()
+	username := r.Header.Get("X-Authenticated-User")
+	user, _ := api.authMgr.GetStore().GetUser(username)
+
+	allAgents := api.broker.List()
+	agents := make([]*protocol.AgentInfo, 0)
+	for _, a := range allAgents {
+		if user == nil || user.CanAccessNode(a) {
+			agents = append(agents, a)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"agents": agents,
@@ -125,9 +136,10 @@ func (api *ServerAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var req struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-			Role     string `json:"role"`
+			Username     string `json:"username"`
+			Password     string `json:"password"`
+			Role         string `json:"role"`
+			AllowedNodes string `json:"allowed_nodes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
@@ -137,12 +149,28 @@ func (api *ServerAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "username and password are required", http.StatusBadRequest)
 			return
 		}
-		user, err := st.CreateUser(req.Username, req.Password, req.Role)
+		user, err := st.CreateUser(req.Username, req.Password, req.Role, req.AllowedNodes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(user)
+
+	case http.MethodPut:
+		var req struct {
+			ID           string `json:"id"`
+			Role         string `json:"role"`
+			AllowedNodes string `json:"allowed_nodes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if err := st.UpdateUser(req.ID, req.Role, req.AllowedNodes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"updated": true})
 
 	case http.MethodDelete:
 		id := r.URL.Query().Get("id")

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, UserPlus, Trash2, Users, Clock } from 'lucide-react';
+import { X, UserPlus, Trash2, Users, Clock, Tag } from 'lucide-react';
 import { UserAccount } from '../types';
 
 interface UsersModalProps {
@@ -23,6 +23,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState<'admin' | 'operator' | 'viewer'>('operator');
+  const [newAllowedNodes, setNewAllowedNodes] = useState('*');
   const [isCreating, setIsCreating] = useState(false);
 
   const fetchUsers = async () => {
@@ -61,6 +62,16 @@ export const UsersModal: React.FC<UsersModalProps> = ({
 
     setIsCreating(true);
     setError(null);
+
+    // Parse allowed nodes input
+    const rules =
+      newAllowedNodes.trim() === '*' || newAllowedNodes.trim() === ''
+        ? ['*']
+        : newAllowedNodes
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+
     try {
       const res = await fetch('/api/v1/users', {
         method: 'POST',
@@ -72,6 +83,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({
           username: newUsername.trim(),
           password: newPassword,
           role: newRole,
+          allowed_nodes: JSON.stringify(rules),
         }),
       });
 
@@ -83,6 +95,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({
       setNewUsername('');
       setNewPassword('');
       setNewRole('operator');
+      setNewAllowedNodes('*');
       await fetchUsers();
     } catch (err: any) {
       setError(err.message || 'Failed to create user');
@@ -160,12 +173,39 @@ export const UsersModal: React.FC<UsersModalProps> = ({
     }
   };
 
+  const renderAllowedNodesBadge = (allowedNodesJson: string) => {
+    let rules: string[] = ['*'];
+    try {
+      if (allowedNodesJson) {
+        rules = JSON.parse(allowedNodesJson);
+      }
+    } catch (e) {
+      rules = [allowedNodesJson];
+    }
+
+    if (rules.includes('*')) {
+      return (
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: '3px' }}>
+          <Tag size={11} />
+          <span>All Nodes (*)</span>
+        </span>
+      );
+    }
+
+    return (
+      <span style={{ fontSize: '0.72rem', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '3px' }}>
+        <Tag size={11} />
+        <span>Restricted to: {rules.join(', ')}</span>
+      </span>
+    );
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
         className="modal-content"
         onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: '680px' }}
+        style={{ maxWidth: '720px' }}
       >
         <div className="modal-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -184,9 +224,9 @@ export const UsersModal: React.FC<UsersModalProps> = ({
               <Users size={18} />
             </div>
             <div>
-              <h3 style={{ fontSize: '1.15rem', fontWeight: 600 }}>Team & User Accounts</h3>
+              <h3 style={{ fontSize: '1.15rem', fontWeight: 600 }}>Team & Node Access Control</h3>
               <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                Manage team access, credentials, and role-based permissions (RBAC)
+                Manage team credentials, roles, and node tag permissions (RBAC)
               </p>
             </div>
           </div>
@@ -221,90 +261,115 @@ export const UsersModal: React.FC<UsersModalProps> = ({
               borderRadius: '8px',
               border: '1px solid var(--border-subtle)',
               display: 'flex',
+              flexDirection: 'column',
               gap: '10px',
-              alignItems: 'flex-end',
-              flexWrap: 'wrap',
             }}
           >
-            <div style={{ flex: 1, minWidth: '130px' }}>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                Username
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. dev_sarah"
-                required
-                value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value)}
-                style={{
-                  width: '100%',
-                  background: 'var(--bg-surface)',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: '6px',
-                  padding: '7px 10px',
-                  color: 'var(--text-main)',
-                  fontSize: '0.82rem',
-                  outline: 'none',
-                }}
-              />
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: '130px' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Username
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. dev_sarah"
+                  required
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  style={{
+                    width: '100%',
+                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px',
+                    padding: '7px 10px',
+                    color: 'var(--text-main)',
+                    fontSize: '0.82rem',
+                    outline: 'none',
+                  }}
+                />
+              </div>
+
+              <div style={{ flex: 1, minWidth: '130px' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Password
+                </label>
+                <input
+                  type="password"
+                  placeholder="Password"
+                  required
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  style={{
+                    width: '100%',
+                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px',
+                    padding: '7px 10px',
+                    color: 'var(--text-main)',
+                    fontSize: '0.82rem',
+                    outline: 'none',
+                  }}
+                />
+              </div>
+
+              <div style={{ width: '130px' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Role
+                </label>
+                <select
+                  value={newRole}
+                  onChange={(e) => setNewRole(e.target.value as any)}
+                  style={{
+                    width: '100%',
+                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px',
+                    padding: '7px 10px',
+                    color: 'var(--text-main)',
+                    fontSize: '0.82rem',
+                    outline: 'none',
+                  }}
+                >
+                  <option value="operator">Operator (SSH)</option>
+                  <option value="admin">Admin (Full)</option>
+                  <option value="viewer">Viewer (Read-Only)</option>
+                </select>
+              </div>
             </div>
 
-            <div style={{ flex: 1, minWidth: '130px' }}>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                Password
-              </label>
-              <input
-                type="password"
-                placeholder="Temporary password"
-                required
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                style={{
-                  width: '100%',
-                  background: 'var(--bg-surface)',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: '6px',
-                  padding: '7px 10px',
-                  color: 'var(--text-main)',
-                  fontSize: '0.82rem',
-                  outline: 'none',
-                }}
-              />
-            </div>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end' }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Allowed Nodes / Tags (comma-separated, e.g. <code>*</code>, <code>env:staging</code>, <code>vps-node-1</code>)
+                </label>
+                <input
+                  type="text"
+                  placeholder="* (for all nodes) or env:staging, team:payments"
+                  value={newAllowedNodes}
+                  onChange={(e) => setNewAllowedNodes(e.target.value)}
+                  style={{
+                    width: '100%',
+                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px',
+                    padding: '7px 10px',
+                    color: 'var(--text-main)',
+                    fontSize: '0.82rem',
+                    outline: 'none',
+                  }}
+                />
+              </div>
 
-            <div style={{ width: '130px' }}>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                Role
-              </label>
-              <select
-                value={newRole}
-                onChange={(e) => setNewRole(e.target.value as any)}
-                style={{
-                  width: '100%',
-                  background: 'var(--bg-surface)',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: '6px',
-                  padding: '7px 10px',
-                  color: 'var(--text-main)',
-                  fontSize: '0.82rem',
-                  outline: 'none',
-                }}
+              <button
+                type="submit"
+                className="btn btn-primary btn-sm"
+                disabled={isCreating}
+                style={{ height: '34px', flexShrink: 0 }}
               >
-                <option value="operator">Operator (SSH)</option>
-                <option value="admin">Admin (Full)</option>
-                <option value="viewer">Viewer (Read-Only)</option>
-              </select>
+                <UserPlus size={14} />
+                <span>Add User</span>
+              </button>
             </div>
-
-            <button
-              type="submit"
-              className="btn btn-primary btn-sm"
-              disabled={isCreating}
-              style={{ height: '34px' }}
-            >
-              <UserPlus size={14} />
-              <span>Add User</span>
-            </button>
           </form>
 
           {/* User List */}
@@ -337,6 +402,11 @@ export const UsersModal: React.FC<UsersModalProps> = ({
                     )}
                     {getRoleBadge(u.role)}
                   </div>
+
+                  <div style={{ marginTop: '4px' }}>
+                    {renderAllowedNodesBadge(u.allowed_nodes)}
+                  </div>
+
                   <div style={{ display: 'flex', gap: '14px', marginTop: '4px', fontSize: '0.73rem', color: 'var(--text-dim)' }}>
                     <span>Joined: {new Date(u.created_at).toLocaleDateString()}</span>
                     {u.last_login_at && (
@@ -364,7 +434,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({
             ))}
           </div>
 
-          {/* Role Explanations */}
+          {/* Role & Tag Explanations */}
           <div
             style={{
               padding: '12px',
@@ -379,11 +449,11 @@ export const UsersModal: React.FC<UsersModalProps> = ({
             }}
           >
             <div>
-              <strong style={{ color: 'var(--text-muted)' }}>Role Permissions:</strong>
+              <strong style={{ color: 'var(--text-muted)' }}>Tag-Based Node Restrictions:</strong>
             </div>
-            <div>• <strong>Admin</strong>: Manage users, generate tokens, full terminal access as any Linux user.</div>
-            <div>• <strong>Operator</strong>: Access assigned VMs, launch terminals, view system status.</div>
-            <div>• <strong>Viewer</strong>: Read-only inventory inspection; cannot open terminal shells or generate tokens.</div>
+            <div>• <code>*</code>: Grants access to all current and future connected nodes.</div>
+            <div>• <code>env:staging</code>: Grants access only to nodes enrolled with tag <code>env=staging</code>.</div>
+            <div>• <code>node:vps-01</code>: Grants access only to specific agent node ID <code>vps-01</code>.</div>
           </div>
         </div>
 

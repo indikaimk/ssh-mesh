@@ -41,6 +41,12 @@ func NewHandler(b broker.Broker, authMgr *auth.Manager, sharedToken string) *Han
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	vmID := r.URL.Query().Get("vm_id")
+	if vmID == "" {
+		http.Error(w, "missing vm_id query param", http.StatusBadRequest)
+		return
+	}
+
 	// Authenticate user via JWT if authMgr is configured
 	if h.authMgr != nil {
 		tokenStr := r.URL.Query().Get("token")
@@ -58,12 +64,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden: viewer role has read-only access and cannot open terminal sessions", http.StatusForbidden)
 			return
 		}
-	}
 
-	vmID := r.URL.Query().Get("vm_id")
-	if vmID == "" {
-		http.Error(w, "missing vm_id query param", http.StatusBadRequest)
-		return
+		// Enforce Node-level permissions
+		agentInfo, err := h.broker.Get(vmID)
+		if err != nil {
+			http.Error(w, "agent not found or offline", http.StatusNotFound)
+			return
+		}
+		userRecord, err := h.authMgr.GetStore().GetUser(claims.Username)
+		if err == nil && userRecord != nil && !userRecord.CanAccessNode(agentInfo) {
+			log.Printf("[Terminal Bridge] Access Denied: User '%s' does not have permission to access node '%s'", claims.Username, vmID)
+			http.Error(w, "forbidden: you do not have permission to access this node", http.StatusForbidden)
+			return
+		}
 	}
 
 	targetUser := r.URL.Query().Get("user")

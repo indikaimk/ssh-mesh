@@ -34,6 +34,7 @@ export interface UserAccount {
   id: string;
   username: string;
   role: 'admin' | 'operator' | 'viewer';
+  allowed_nodes: string;
   created_at: string;
   last_login_at?: string;
 }

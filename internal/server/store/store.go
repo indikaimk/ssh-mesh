@@ -4,14 +4,18 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -25,29 +29,88 @@ var (
 
 // User represents an authenticated dashboard user
 type User struct {
-	ID          string     `json:"id"`
-	Username    string     `json:"username"`
-	Role        string     `json:"role"` // "admin", "operator", "viewer"
-	CreatedAt   time.Time  `json:"created_at"`
-	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+	ID           string  `db:"id" json:"id"`
+	Username     string  `db:"username" json:"username"`
+	PasswordHash string  `db:"password_hash" json:"-"`
+	Role         string  `db:"role" json:"role"` // "admin", "operator", "viewer"
+	AllowedNodes string  `db:"allowed_nodes" json:"allowed_nodes"` // JSON array, e.g. ["*"] or ["env:staging", "node:vps-1"]
+	CreatedAt    string  `db:"created_at" json:"created_at"`
+	LastLoginAt  *string `db:"last_login_at" json:"last_login_at,omitempty"`
+}
+
+// CanAccessNode evaluates whether the user has permission to view or connect to the agent node
+func (u *User) CanAccessNode(agent *protocol.AgentInfo) bool {
+	if u.Role == "admin" {
+		return true
+	}
+	if agent == nil {
+		return false
+	}
+
+	var rules []string
+	if u.AllowedNodes == "" || u.AllowedNodes == `["*"]` {
+		rules = []string{"*"}
+	} else {
+		_ = json.Unmarshal([]byte(u.AllowedNodes), &rules)
+	}
+
+	for _, rule := range rules {
+		rule = strings.TrimSpace(rule)
+		if rule == "*" {
+			return true
+		}
+		// Match direct Node ID: "node:vps-1" or "vps-1"
+		if strings.HasPrefix(rule, "node:") {
+			if strings.TrimPrefix(rule, "node:") == agent.ID || strings.TrimPrefix(rule, "node:") == agent.Hostname {
+				return true
+			}
+		} else if rule == agent.ID || rule == agent.Hostname {
+			return true
+		}
+
+		// Match Tags: "env:staging", "tag:env=staging", "env=staging"
+		tagRule := rule
+		if strings.HasPrefix(tagRule, "tag:") {
+			tagRule = strings.TrimPrefix(tagRule, "tag:")
+		}
+
+		var key, val string
+		if strings.Contains(tagRule, "=") {
+			parts := strings.SplitN(tagRule, "=", 2)
+			key, val = parts[0], parts[1]
+		} else if strings.Contains(tagRule, ":") {
+			parts := strings.SplitN(tagRule, ":", 2)
+			key, val = parts[0], parts[1]
+		}
+
+		if key != "" && agent.Tags != nil {
+			if agent.Tags[key] == val {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // EnrollmentToken represents a token for agent enrollment
 type EnrollmentToken struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Token     string    `json:"token"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Revoked   bool      `json:"revoked"`
+	ID        string  `db:"id" json:"id"`
+	Name      string  `db:"name" json:"name"`
+	Token     string  `db:"token" json:"token"`
+	CreatedAt string  `db:"created_at" json:"created_at"`
+	ExpiresAt *string `db:"expires_at" json:"expires_at,omitempty"`
+	Revoked   bool    `db:"revoked" json:"revoked"`
 }
 
 // Store defines persistence operations for users and tokens
 type Store interface {
 	AuthenticateUser(username, password string) (*User, error)
-	CreateUser(username, password, role string) (*User, error)
+	CreateUser(username, password, role, allowedNodes string) (*User, error)
+	GetUser(username string) (*User, error)
 	ListUsers() ([]*User, error)
 	DeleteUser(id string) error
+	UpdateUser(id, role, allowedNodes string) error
 	UpdatePassword(username, newPassword string) error
 	CreateToken(name string, duration time.Duration) (*EnrollmentToken, error)
 	ListTokens() ([]*EnrollmentToken, error)
@@ -56,13 +119,13 @@ type Store interface {
 	Close() error
 }
 
-// SQLiteStore implements Store using modernc.org/sqlite
+// SQLiteStore implements Store using sqlx and modernc.org/sqlite
 type SQLiteStore struct {
 	mu sync.RWMutex
-	db *sql.DB
+	db *sqlx.DB
 }
 
-// NewSQLiteStore initializes SQLite database and runs initial schema migrations
+// NewSQLiteStore initializes SQLite database and runs initial schema migrations using sqlx
 func NewSQLiteStore(dbPath string, defaultAdminUser, defaultAdminPass, defaultToken string) (*SQLiteStore, error) {
 	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -70,9 +133,9 @@ func NewSQLiteStore(dbPath string, defaultAdminUser, defaultAdminPass, defaultTo
 		}
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sqlx.Open("sqlite", dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
+		return nil, fmt.Errorf("failed to open sqlite database with sqlx: %w", err)
 	}
 
 	// Performance pragmas for SQLite
@@ -110,6 +173,7 @@ func (s *SQLiteStore) migrate() error {
 		username TEXT UNIQUE NOT NULL,
 		password_hash TEXT NOT NULL,
 		role TEXT NOT NULL DEFAULT 'operator',
+		allowed_nodes TEXT NOT NULL DEFAULT '["*"]',
 		created_at TEXT NOT NULL,
 		last_login_at TEXT
 	);
@@ -123,13 +187,18 @@ func (s *SQLiteStore) migrate() error {
 		revoked INTEGER NOT NULL DEFAULT 0
 	);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Ensure allowed_nodes column exists if migrating an existing database
+	_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN allowed_nodes TEXT NOT NULL DEFAULT '["*"]'`)
+	return nil
 }
 
 func (s *SQLiteStore) seedAdmin(username, password string) error {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", username).Scan(&count)
+	err := s.db.Get(&count, "SELECT COUNT(*) FROM users WHERE username = ?", username)
 	if err != nil {
 		return err
 	}
@@ -142,25 +211,44 @@ func (s *SQLiteStore) seedAdmin(username, password string) error {
 		return err
 	}
 
-	id := uuid.New().String()
-	_, err = s.db.Exec(`
-		INSERT INTO users (id, username, password_hash, role, created_at)
-		VALUES (?, ?, ?, 'admin', ?)
-	`, id, username, string(hash), time.Now().UTC().Format(time.RFC3339))
+	u := &User{
+		ID:           uuid.New().String(),
+		Username:     username,
+		PasswordHash: string(hash),
+		Role:         "admin",
+		AllowedNodes: `["*"]`,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+
+	_, err = s.db.NamedExec(`
+		INSERT INTO users (id, username, password_hash, role, allowed_nodes, created_at)
+		VALUES (:id, :username, :password_hash, :role, :allowed_nodes, :created_at)
+	`, u)
 	return err
 }
 
 func (s *SQLiteStore) seedToken(name, token string) error {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM enrollment_tokens WHERE token = ?", token).Scan(&count)
+	err := s.db.Get(&count, "SELECT COUNT(*) FROM enrollment_tokens WHERE token = ?", token)
 	if err != nil || count > 0 {
 		return nil
 	}
 
-	_, err = s.db.Exec(`
+	now := time.Now().UTC().Format(time.RFC3339)
+	exp := time.Now().Add(365 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	tok := &EnrollmentToken{
+		ID:        "default",
+		Name:      name,
+		Token:     token,
+		CreatedAt: now,
+		ExpiresAt: &exp,
+		Revoked:   false,
+	}
+
+	_, err = s.db.NamedExec(`
 		INSERT INTO enrollment_tokens (id, name, token, created_at, expires_at, revoked)
-		VALUES ('default', ?, ?, ?, ?, 0)
-	`, name, token, time.Now().UTC().Format(time.RFC3339), time.Now().Add(365*24*time.Hour).UTC().Format(time.RFC3339))
+		VALUES (:id, :name, :token, :created_at, :expires_at, :revoked)
+	`, tok)
 	return err
 }
 
@@ -169,41 +257,49 @@ func (s *SQLiteStore) AuthenticateUser(username, password string) (*User, error)
 	defer s.mu.Unlock()
 
 	var u User
-	var hash string
-	var createdAtStr string
-	var lastLoginStr sql.NullString
-
-	row := s.db.QueryRow(`
-		SELECT id, username, password_hash, role, created_at, last_login_at
-		FROM users
-		WHERE username = ?
-	`, username)
-
-	if err := row.Scan(&u.ID, &u.Username, &hash, &u.Role, &createdAtStr, &lastLoginStr); err != nil {
+	err := s.db.Get(&u, "SELECT * FROM users WHERE username = ?", username)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrInvalidPassword
 		}
 		return nil, err
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
 		return nil, ErrInvalidPassword
 	}
 
-	u.CreatedAt, _ = parseTime(createdAtStr)
-	now := time.Now().UTC()
-	_, _ = s.db.Exec("UPDATE users SET last_login_at = ? WHERE id = ?", now.Format(time.RFC3339), u.ID)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = s.db.Exec("UPDATE users SET last_login_at = ? WHERE id = ?", now, u.ID)
 	u.LastLoginAt = &now
 
 	return &u, nil
 }
 
-func (s *SQLiteStore) CreateUser(username, password, role string) (*User, error) {
+func (s *SQLiteStore) GetUser(username string) (*User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var u User
+	err := s.db.Get(&u, "SELECT * FROM users WHERE username = ?", username)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *SQLiteStore) CreateUser(username, password, role, allowedNodes string) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if role != "admin" && role != "operator" && role != "viewer" {
 		role = "operator"
+	}
+	if allowedNodes == "" {
+		allowedNodes = `["*"]`
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -211,18 +307,20 @@ func (s *SQLiteStore) CreateUser(username, password, role string) (*User, error)
 		return nil, err
 	}
 
-	now := time.Now().UTC()
+	now := time.Now().UTC().Format(time.RFC3339)
 	u := &User{
-		ID:        uuid.New().String(),
-		Username:  username,
-		Role:      role,
-		CreatedAt: now,
+		ID:           uuid.New().String(),
+		Username:     username,
+		PasswordHash: string(hash),
+		Role:         role,
+		AllowedNodes: allowedNodes,
+		CreatedAt:    now,
 	}
 
-	_, err = s.db.Exec(`
-		INSERT INTO users (id, username, password_hash, role, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, u.ID, u.Username, string(hash), u.Role, now.Format(time.RFC3339))
+	_, err = s.db.NamedExec(`
+		INSERT INTO users (id, username, password_hash, role, allowed_nodes, created_at)
+		VALUES (:id, :username, :password_hash, :role, :allowed_nodes, :created_at)
+	`, u)
 
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUserAlreadyExists, err)
@@ -235,42 +333,38 @@ func (s *SQLiteStore) ListUsers() ([]*User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query(`
-		SELECT id, username, role, created_at, last_login_at
-		FROM users
-		ORDER BY created_at ASC
-	`)
+	var users []*User
+	err := s.db.Select(&users, "SELECT * FROM users ORDER BY created_at ASC")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return users, nil
+}
 
-	users := make([]*User, 0)
-	for rows.Next() {
-		var u User
-		var createdAtStr string
-		var lastLoginStr sql.NullString
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &createdAtStr, &lastLoginStr); err != nil {
-			return nil, err
-		}
-		u.CreatedAt, _ = parseTime(createdAtStr)
-		if lastLoginStr.Valid {
-			t, err := parseTime(lastLoginStr.String)
-			if err == nil {
-				u.LastLoginAt = &t
-			}
-		}
-		users = append(users, &u)
+func (s *SQLiteStore) UpdateUser(id, role, allowedNodes string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if allowedNodes == "" {
+		allowedNodes = `["*"]`
 	}
-	return users, rows.Err()
+	res, err := s.db.Exec("UPDATE users SET role = ?, allowed_nodes = ? WHERE id = ?", role, allowedNodes, id)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 func (s *SQLiteStore) DeleteUser(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var username, role string
-	err := s.db.QueryRow("SELECT username, role FROM users WHERE id = ?", id).Scan(&username, &role)
+	var u User
+	err := s.db.Get(&u, "SELECT id, username, role FROM users WHERE id = ?", id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrUserNotFound
@@ -278,10 +372,9 @@ func (s *SQLiteStore) DeleteUser(id string) error {
 		return err
 	}
 
-	// Prevent deleting the primary admin account if it's the only admin
-	if role == "admin" {
+	if u.Role == "admin" {
 		var adminCount int
-		_ = s.db.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&adminCount)
+		_ = s.db.Get(&adminCount, "SELECT COUNT(*) FROM users WHERE role = 'admin'")
 		if adminCount <= 1 {
 			return errors.New("cannot delete the only remaining admin account")
 		}
@@ -319,12 +412,11 @@ func (s *SQLiteStore) CreateToken(name string, duration time.Duration) (*Enrollm
 	_, _ = rand.Read(randBytes)
 	tokenStr := "mesh_" + hex.EncodeToString(randBytes)
 
-	now := time.Now().UTC()
-	expiresAt := time.Time{}
-	var expiresAtStr string
+	now := time.Now().UTC().Format(time.RFC3339)
+	var expStr *string
 	if duration > 0 {
-		expiresAt = now.Add(duration)
-		expiresAtStr = expiresAt.Format(time.RFC3339)
+		exp := time.Now().Add(duration).UTC().Format(time.RFC3339)
+		expStr = &exp
 	}
 
 	t := &EnrollmentToken{
@@ -332,14 +424,14 @@ func (s *SQLiteStore) CreateToken(name string, duration time.Duration) (*Enrollm
 		Name:      name,
 		Token:     tokenStr,
 		CreatedAt: now,
-		ExpiresAt: expiresAt,
+		ExpiresAt: expStr,
 		Revoked:   false,
 	}
 
-	_, err := s.db.Exec(`
+	_, err := s.db.NamedExec(`
 		INSERT INTO enrollment_tokens (id, name, token, created_at, expires_at, revoked)
-		VALUES (?, ?, ?, ?, ?, 0)
-	`, t.ID, t.Name, t.Token, now.Format(time.RFC3339), sqlNullString(expiresAtStr))
+		VALUES (:id, :name, :token, :created_at, :expires_at, :revoked)
+	`, t)
 	if err != nil {
 		return nil, err
 	}
@@ -351,54 +443,29 @@ func (s *SQLiteStore) ListTokens() ([]*EnrollmentToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query(`
-		SELECT id, name, token, created_at, expires_at, revoked
-		FROM enrollment_tokens
-		ORDER BY created_at DESC
-	`)
+	var tokens []*EnrollmentToken
+	err := s.db.Select(&tokens, "SELECT * FROM enrollment_tokens ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	tokens := make([]*EnrollmentToken, 0)
-	for rows.Next() {
-		var t EnrollmentToken
-		var createdAtStr string
-		var expStr sql.NullString
-		if err := rows.Scan(&t.ID, &t.Name, &t.Token, &createdAtStr, &expStr, &t.Revoked); err != nil {
-			return nil, err
-		}
-		t.CreatedAt, _ = parseTime(createdAtStr)
-		if expStr.Valid && expStr.String != "" {
-			t.ExpiresAt, _ = parseTime(expStr.String)
-		}
-		tokens = append(tokens, &t)
-	}
-	return tokens, rows.Err()
+	return tokens, nil
 }
 
 func (s *SQLiteStore) ValidateToken(token string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var expStr sql.NullString
-	var revoked bool
-
-	err := s.db.QueryRow(`
-		SELECT expires_at, revoked
-		FROM enrollment_tokens
-		WHERE token = ?
-	`, token).Scan(&expStr, &revoked)
-
-	if err != nil || revoked {
+	var t EnrollmentToken
+	err := s.db.Get(&t, "SELECT * FROM enrollment_tokens WHERE token = ?", token)
+	if err != nil || t.Revoked {
 		return false
 	}
 
-	if expStr.Valid && expStr.String != "" {
-		exp, err := parseTime(expStr.String)
-		if err == nil && !exp.IsZero() && time.Now().After(exp) {
-			return false
+	if t.ExpiresAt != nil && *t.ExpiresAt != "" {
+		if exp, err := time.Parse(time.RFC3339, *t.ExpiresAt); err == nil {
+			if !exp.IsZero() && time.Now().After(exp) {
+				return false
+			}
 		}
 	}
 
@@ -422,18 +489,4 @@ func (s *SQLiteStore) RevokeToken(id string) error {
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
-}
-
-func parseTime(s string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
-	}
-	return time.Parse("2006-01-02 15:04:05", s)
-}
-
-func sqlNullString(s string) interface{} {
-	if s == "" {
-		return nil
-	}
-	return s
 }
