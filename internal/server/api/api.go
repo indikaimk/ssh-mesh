@@ -5,57 +5,148 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 )
 
 // ServerAPI provides REST endpoints for the web UI.
 type ServerAPI struct {
-	broker        broker.Broker
-	requiredToken string
-	serverHost    string
+	broker     broker.Broker
+	authMgr    *auth.Manager
+	serverHost string
 }
 
 // NewServerAPI initializes the API handler.
-func NewServerAPI(b broker.Broker, requiredToken, serverHost string) *ServerAPI {
+func NewServerAPI(b broker.Broker, authMgr *auth.Manager, serverHost string) *ServerAPI {
 	return &ServerAPI{
-		broker:        b,
-		requiredToken: requiredToken,
-		serverHost:    serverHost,
+		broker:     b,
+		authMgr:    authMgr,
+		serverHost: serverHost,
 	}
 }
 
 // RegisterRoutes attaches the REST handlers to an http.ServeMux
 func (api *ServerAPI) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/v1/agents", api.handleAgents)
+	// Public routes
+	mux.HandleFunc("/api/v1/auth/login", api.handleLogin)
 	mux.HandleFunc("/api/v1/health", api.handleHealth)
 	mux.HandleFunc("/api/v1/install-script", api.handleInstallScript)
+
+	// Protected routes (require JWT)
+	mux.Handle("/api/v1/auth/me", api.authMgr.Middleware(http.HandlerFunc(api.handleMe)))
+	mux.Handle("/api/v1/agents", api.authMgr.Middleware(http.HandlerFunc(api.handleAgents)))
+	mux.Handle("/api/v1/tokens", api.authMgr.Middleware(http.HandlerFunc(api.handleTokens)))
 }
 
-func (api *ServerAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
+func (api *ServerAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	token, err := api.authMgr.AuthenticateUser(req.Username, req.Password)
+	if err != nil {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"token": token,
+		"user":  req.Username,
+	})
+}
+
+func (api *ServerAPI) handleMe(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	user := r.Header.Get("X-Authenticated-User")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"user":  user,
+		"valid": true,
+	})
+}
+
+func (api *ServerAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	agents := api.broker.List()
+	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"agents": agents,
 		"count":  len(agents),
 	})
 }
 
+func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case http.MethodGet:
+		tokens := api.authMgr.ListEnrollmentTokens()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"tokens": tokens,
+		})
+
+	case http.MethodPost:
+		var req struct {
+			Name          string `json:"name"`
+			DurationHours int    `json:"duration_hours"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Name == "" {
+			req.Name = "Custom Token"
+		}
+		duration := time.Duration(req.DurationHours) * time.Hour
+		tokenEntry := api.authMgr.CreateEnrollmentToken(req.Name, duration)
+		_ = json.NewEncoder(w).Encode(tokenEntry)
+
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "missing token id", http.StatusBadRequest)
+			return
+		}
+		success := api.authMgr.RevokeEnrollmentToken(id)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"revoked": success,
+		})
+
+	case http.MethodOptions:
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (api *ServerAPI) handleHealth(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "healthy",
@@ -78,9 +169,18 @@ func (api *ServerAPI) handleInstallScript(w http.ResponseWriter, r *http.Request
 	}
 
 	tunnelURL := fmt.Sprintf("%s://%s/api/v1/agent/tunnel", scheme, host)
-	token := api.requiredToken
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		// Use first active token or default
+		tokens := api.authMgr.ListEnrollmentTokens()
+		for _, t := range tokens {
+			if !t.Revoked {
+				token = t.Token
+				break
+			}
+		}
+	}
 
-	// Generate install script for Linux VPS
 	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 
@@ -93,10 +193,7 @@ SERVICE_FILE="/etc/systemd/system/ssh-mesh-agent.service"
 SERVER_URL="%s"
 TOKEN="%s"
 
-echo "[1/3] Downloading latest agent binary..."
-# Note: For production, binaries can be hosted at /api/v1/download/agent
-# For local development or testing, compile or copy to /usr/local/bin/ssh-mesh-agent
-echo "Target server: ${SERVER_URL}"
+echo "[1/3] Target control plane: ${SERVER_URL}"
 
 cat << 'EOF' > /tmp/ssh-mesh-agent-run.sh
 #!/usr/bin/env bash
@@ -134,4 +231,10 @@ echo "Installation complete."
 `, tunnelURL, token, tunnelURL, token)
 
 	_, _ = w.Write([]byte(strings.TrimSpace(script) + "\n"))
+}
+
+func setCors(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }

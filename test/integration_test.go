@@ -13,6 +13,7 @@ import (
 	"github.com/ssh-mesh/ssh-mesh/internal/agent/client"
 	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/api"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/sshbridge"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/tunnel"
@@ -23,10 +24,11 @@ func TestEndToEndReverseSSH(t *testing.T) {
 	agentID := "test-vps-node-1"
 
 	// 1. Setup Server
+	authMgr := auth.NewManager("admin", "admin", testToken)
 	b := broker.NewMemoryBroker()
-	tunnelH := tunnel.NewHandler(b, testToken)
-	bridgeH := sshbridge.NewHandler(b, testToken)
-	apiH := api.NewServerAPI(b, testToken, "")
+	tunnelH := tunnel.NewHandler(b, authMgr)
+	bridgeH := sshbridge.NewHandler(b, authMgr, testToken)
+	apiH := api.NewServerAPI(b, authMgr, "")
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/agent/tunnel", tunnelH)
@@ -71,8 +73,15 @@ func TestEndToEndReverseSSH(t *testing.T) {
 		t.Fatalf("Agent failed to register with server within 2 seconds")
 	}
 
-	// 3. Verify REST API returns agent
-	resp, err := http.Get(server.URL + "/api/v1/agents")
+	// 3. Authenticate and verify REST API returns agent
+	jwtToken, err := authMgr.AuthenticateUser("admin", "admin")
+	if err != nil {
+		t.Fatalf("Failed to generate JWT: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to query /api/v1/agents: %v", err)
 	}
@@ -89,8 +98,8 @@ func TestEndToEndReverseSSH(t *testing.T) {
 		t.Fatalf("Expected 1 agent with ID %s, got: %+v", agentID, apiResp.Agents)
 	}
 
-	// 4. Connect Web Terminal via WebSocket (emulating browser Xterm.js)
-	terminalURL := wsURL + "/api/v1/ws/terminal?vm_id=" + agentID + "&cols=80&rows=24"
+	// 4. Connect Web Terminal via WebSocket with JWT (emulating browser Xterm.js)
+	terminalURL := wsURL + "/api/v1/ws/terminal?vm_id=" + agentID + "&cols=80&rows=24&token=" + jwtToken
 	dialer := websocket.DefaultDialer
 	wsConn, _, err := dialer.Dial(terminalURL, nil)
 	if err != nil {

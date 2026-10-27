@@ -124,11 +124,11 @@ func (s *Server) HandleConn(netConn net.Conn) {
 			return
 		}
 
-		go s.handleSession(channel, requests)
+		go s.handleSession(channel, requests, sshConn.User())
 	}
 }
 
-func (s *Server) handleSession(channel ssh.Channel, requests <-chan *ssh.Request) {
+func (s *Server) handleSession(channel ssh.Channel, requests <-chan *ssh.Request, targetUser string) {
 	defer channel.Close()
 
 	var (
@@ -168,7 +168,16 @@ func (s *Server) handleSession(channel ssh.Channel, requests <-chan *ssh.Request
 			_ = req.Reply(true, nil)
 
 		case "shell":
-			cmd = exec.Command(s.shell)
+			isRoot := os.Geteuid() == 0
+			if targetUser != "" && targetUser != "mesh-user" && targetUser != "default" {
+				if isRoot && targetUser != "root" {
+					cmd = exec.Command("su", "-l", targetUser)
+				} else {
+					cmd = exec.Command(s.shell)
+				}
+			} else {
+				cmd = exec.Command(s.shell)
+			}
 			cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 			ptyMu.Lock()

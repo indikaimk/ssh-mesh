@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 	"golang.org/x/crypto/ssh"
 )
@@ -25,23 +26,43 @@ var upgrader = websocket.Upgrader{
 
 // Handler handles user terminal sessions coming from the browser (Xterm.js).
 type Handler struct {
-	broker        broker.Broker
-	sharedToken   string
+	broker      broker.Broker
+	authMgr     *auth.Manager
+	sharedToken string
 }
 
 // NewHandler creates a new terminal bridge handler.
-func NewHandler(b broker.Broker, sharedToken string) *Handler {
+func NewHandler(b broker.Broker, authMgr *auth.Manager, sharedToken string) *Handler {
 	return &Handler{
 		broker:      b,
+		authMgr:     authMgr,
 		sharedToken: sharedToken,
 	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user via JWT if authMgr is configured
+	if h.authMgr != nil {
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			http.Error(w, "missing authentication token", http.StatusUnauthorized)
+			return
+		}
+		if _, err := h.authMgr.VerifyJWT(tokenStr); err != nil {
+			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+	}
+
 	vmID := r.URL.Query().Get("vm_id")
 	if vmID == "" {
 		http.Error(w, "missing vm_id query param", http.StatusBadRequest)
 		return
+	}
+
+	targetUser := r.URL.Query().Get("user")
+	if targetUser == "" {
+		targetUser = "mesh-user"
 	}
 
 	cols := uint32(80)
@@ -70,9 +91,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer stream.Close()
 
-	// Connect SSH client over this stream
+	// Connect SSH client over this stream with specified targetUser
 	sshConfig := &ssh.ClientConfig{
-		User: "mesh-user",
+		User: targetUser,
 		Auth: []ssh.AuthMethod{
 			ssh.Password(h.sharedToken),
 		},

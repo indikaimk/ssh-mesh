@@ -16,6 +16,16 @@ export interface TerminalTab {
   agentId: string;
   hostname: string;
   privateIp: string;
+  user?: string;
   status: 'connecting' | 'connected' | 'disconnected' | 'error';
   errorMsg?: string;
+}
+
+export interface EnrollmentToken {
+  id: string;
+  name: string;
+  token: string;
+  created_at: string;
+  expires_at?: string;
+  revoked: boolean;
 }

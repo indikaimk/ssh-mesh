@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ssh-mesh/ssh-mesh/internal/server/api"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/sshbridge"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/tunnel"
@@ -21,16 +22,19 @@ import (
 func main() {
 	addr := flag.String("addr", getEnv("SSH_MESH_ADDR", ":8080"), "Control plane listen address")
 	token := flag.String("token", getEnv("SSH_MESH_TOKEN", "mesh-secret-token"), "Enrollment authentication token for agents")
+	adminUser := flag.String("admin-user", getEnv("SSH_MESH_ADMIN_USER", "admin"), "Admin username for web dashboard")
+	adminPass := flag.String("admin-pass", getEnv("SSH_MESH_ADMIN_PASSWORD", "admin"), "Admin password for web dashboard")
 	webDir := flag.String("web-dir", getEnv("SSH_MESH_WEB_DIR", "./web/dist"), "Path to frontend static assets")
 	flag.Parse()
 
-	// 1. Initialize Broker (decoupled interface for scaling)
+	// 1. Initialize Auth Manager & Broker
+	authMgr := auth.NewManager(*adminUser, *adminPass, *token)
 	sessionBroker := broker.NewMemoryBroker()
 
-	// 2. Initialize Tunnel and Bridge handlers
-	tunnelHandler := tunnel.NewHandler(sessionBroker, *token)
-	terminalBridge := sshbridge.NewHandler(sessionBroker, *token)
-	restAPI := api.NewServerAPI(sessionBroker, *token, "")
+	// 2. Initialize Tunnel, Bridge, and API handlers with auth
+	tunnelHandler := tunnel.NewHandler(sessionBroker, authMgr)
+	terminalBridge := sshbridge.NewHandler(sessionBroker, authMgr, *token)
+	restAPI := api.NewServerAPI(sessionBroker, authMgr, "")
 
 	mux := http.NewServeMux()
 

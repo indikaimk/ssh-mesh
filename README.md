@@ -74,9 +74,23 @@ cd web && npm install && npm run build && cd ..
 
 ### 2. Start the Control Plane Server
 ```bash
-./bin/ssh-mesh-server -addr :8080 -token mesh-secret-token -web-dir ./web/dist
+./bin/ssh-mesh-server \
+  -addr :8080 \
+  -admin-user admin \
+  -admin-pass admin \
+  -token mesh-secret-token \
+  -web-dir ./web/dist
 ```
-Open **`http://localhost:8080`** in your browser.
+Open **`http://localhost:8080`** in your browser and sign in with `admin` / `admin`.
+
+---
+
+## 🔒 Security & Access Control
+
+- **Web Dashboard Authentication**: Protected with HMAC-SHA256 JWT tokens. REST endpoints and WebSocket terminal sessions require authenticated sessions.
+- **Dynamic Enrollment Tokens**: Generate named agent tokens with custom expiration (e.g. 24h, 7d) and one-click revocation from the web dashboard.
+- **Target Linux User Selection**: When launching a terminal, choose to drop privileges to `ubuntu`, `root`, `ec2-user`, or any local Unix user.
+- **Private Subnet Isolation**: Agents only dial **outbound** over port 443/80. No public IPs or inbound firewall rules required on the target VMs.
 
 ### 3. Connect a VPS / Node
 On any remote machine with internet access (even behind NAT/firewall):

@@ -9,6 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 	"github.com/ssh-mesh/ssh-mesh/pkg/wsconn"
 )
@@ -23,15 +24,15 @@ var upgrader = websocket.Upgrader{
 
 // Handler handles reverse tunnel connections from agents.
 type Handler struct {
-	broker        broker.Broker
-	requiredToken string
+	broker  broker.Broker
+	authMgr *auth.Manager
 }
 
 // NewHandler creates a new tunnel endpoint handler.
-func NewHandler(b broker.Broker, requiredToken string) *Handler {
+func NewHandler(b broker.Broker, authMgr *auth.Manager) *Handler {
 	return &Handler{
-		broker:        b,
-		requiredToken: requiredToken,
+		broker:  b,
+		authMgr: authMgr,
 	}
 }
 
@@ -40,9 +41,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	token := r.Header.Get(protocol.HeaderAgentToken)
 	agentInfoRaw := r.Header.Get(protocol.HeaderAgentInfo)
 
-	// Validate token
-	if h.requiredToken != "" && token != h.requiredToken {
-		log.Printf("[Server Tunnel] Unauthorized connection attempt from %s (invalid token)", r.RemoteAddr)
+	// Validate token dynamically against auth manager
+	if h.authMgr != nil && !h.authMgr.ValidateAgentToken(token) {
+		log.Printf("[Server Tunnel] Unauthorized connection attempt from %s (invalid or revoked token)", r.RemoteAddr)
 		http.Error(w, "unauthorized agent token", http.StatusUnauthorized)
 		return
 	}

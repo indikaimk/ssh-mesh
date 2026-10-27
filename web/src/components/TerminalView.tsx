@@ -7,10 +7,11 @@ import { RefreshCw, Trash2, Maximize2, Minimize2 } from 'lucide-react';
 
 interface TerminalViewProps {
   tab: TerminalTab;
+  authToken?: string;
   onClose: (tabId: string) => void;
 }
 
-export const TerminalView: React.FC<TerminalViewProps> = ({ tab }) => {
+export const TerminalView: React.FC<TerminalViewProps> = ({ tab, authToken = localStorage.getItem('ssh_mesh_jwt') || '' }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -77,9 +78,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({ tab }) => {
     }
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const userParam = tab.user ? `&user=${encodeURIComponent(tab.user)}` : '';
+    const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
     const wsUrl = `${proto}//${window.location.host}/api/v1/ws/terminal?vm_id=${encodeURIComponent(
       tab.agentId
-    )}&cols=${term.cols}&rows=${term.rows}`;
+    )}&cols=${term.cols}&rows=${term.rows}${userParam}${tokenParam}`;
 
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
@@ -200,6 +203,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({ tab }) => {
           <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
             {tab.privateIp}
           </span>
+          {tab.user && (
+            <span
+              className="badge-tag"
+              style={{
+                background: 'rgba(139, 92, 246, 0.15)',
+                color: '#c084fc',
+                borderColor: 'rgba(139, 92, 246, 0.3)',
+              }}
+            >
+              user: {tab.user}
+            </span>
+          )}
           <span className="badge-tag" style={{ textTransform: 'capitalize' }}>
             {status}
           </span>
