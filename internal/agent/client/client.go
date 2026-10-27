@@ -74,6 +74,9 @@ func (a *Agent) Run(ctx context.Context) error {
 
 		log.Printf("[Agent] Connecting reverse tunnel to %s (Agent ID: %s)...", a.cfg.ServerURL, a.cfg.AgentID)
 		err := a.connectAndServe(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			log.Printf("[Agent] Connection error: %v. Retrying in %v...", err, backoff)
 		}
@@ -142,12 +145,28 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 	}
 	defer session.Close()
 
+	// Watch for context cancellation to immediately unblock session.Accept()
+	closeDone := make(chan struct{})
+	defer close(closeDone)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = session.Close()
+			_ = ws.Close()
+		case <-closeDone:
+		}
+	}()
+
 	log.Printf("[Agent] Embedded SSH server listening for incoming tunnel sessions...")
 
 	// Serve incoming Yamux streams as SSH connections
 	for {
 		stream, err := session.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if session.IsClosed() {
 				return nil
 			}
