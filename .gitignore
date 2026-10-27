@@ -25,6 +25,12 @@ yarn-error.log*
 *.key
 *.pem
 
+# Database / Local Storage
+*.db
+*.db-journal
+*.db-wal
+data/
+
 # IDE / Editor
 .vscode/
 .idea/

@@ -1,26 +1,41 @@
 package auth
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/ssh-mesh/ssh-mesh/internal/server/store"
 )
 
 func TestAuthManager(t *testing.T) {
-	mgr := NewManager("admin", "securepass123", "default-token")
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	st, err := store.NewSQLiteStore(dbPath, "admin", "securepass123", "default-token")
+	if err != nil {
+		t.Fatalf("Failed to initialize test store: %v", err)
+	}
+	defer st.Close()
+
+	mgr := NewManager(st)
 
 	// 1. Test Login & JWT
-	token, err := mgr.AuthenticateUser("admin", "securepass123")
+	token, user, err := mgr.AuthenticateUser("admin", "securepass123")
 	if err != nil {
 		t.Fatalf("Failed to authenticate valid credentials: %v", err)
 	}
+	if user.Role != "admin" {
+		t.Fatalf("Expected admin role, got %s", user.Role)
+	}
 
-	sub, err := mgr.VerifyJWT(token)
-	if err != nil || sub != "admin" {
-		t.Fatalf("Failed to verify valid JWT: %v (sub: %s)", err, sub)
+	claims, err := mgr.VerifyJWT(token)
+	if err != nil || claims.Username != "admin" || claims.Role != "admin" {
+		t.Fatalf("Failed to verify valid JWT: %v (claims: %+v)", err, claims)
 	}
 
 	// 2. Test Invalid Login
-	_, err = mgr.AuthenticateUser("admin", "wrongpass")
+	_, _, err = mgr.AuthenticateUser("admin", "wrongpass")
 	if err == nil {
 		t.Fatalf("Expected error for invalid credentials, got nil")
 	}
@@ -37,14 +52,17 @@ func TestAuthManager(t *testing.T) {
 		t.Fatalf("Expected default-token to be valid")
 	}
 
-	newTok := mgr.CreateEnrollmentToken("Dev Cluster", 1*time.Hour)
+	newTok, err := st.CreateToken("Dev Cluster", 1*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to create token: %v", err)
+	}
 	if !mgr.ValidateAgentToken(newTok.Token) {
 		t.Fatalf("Expected newly created token %s to be valid", newTok.Token)
 	}
 
 	// Revoke token
-	if !mgr.RevokeEnrollmentToken(newTok.ID) {
-		t.Fatalf("Failed to revoke token %s", newTok.ID)
+	if err := st.RevokeToken(newTok.ID); err != nil {
+		t.Fatalf("Failed to revoke token %s: %v", newTok.ID, err)
 	}
 	if mgr.ValidateAgentToken(newTok.Token) {
 		t.Fatalf("Revoked token should not be valid")

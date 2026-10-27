@@ -5,19 +5,19 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/ssh-mesh/ssh-mesh/internal/server/store"
 )
 
 var (
 	ErrInvalidToken = errors.New("invalid or expired token")
 	ErrUnauthorized = errors.New("unauthorized")
+	ErrForbidden    = errors.New("forbidden: insufficient permissions")
 )
 
 // JWTHeader defines standard JWT header
@@ -26,182 +26,101 @@ type JWTHeader struct {
 	Typ string `json:"typ"`
 }
 
-// JWTClaims defines payload claims
+// JWTClaims defines payload claims with user role
 type JWTClaims struct {
-	Sub string `json:"sub"`
-	Exp int64  `json:"exp"`
-	Iat int64  `json:"iat"`
+	Sub  string `json:"sub"`  // Username
+	Role string `json:"role"` // "admin", "operator", "viewer"
+	Exp  int64  `json:"exp"`
+	Iat  int64  `json:"iat"`
 }
 
-// EnrollmentToken represents a generated token to enroll agents
-type EnrollmentToken struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Token     string    `json:"token"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Revoked   bool      `json:"revoked"`
+// UserClaims is the validated context of the authenticated user
+type UserClaims struct {
+	Username string
+	Role     string
 }
 
-// Manager handles user authentication and agent enrollment tokens
+// Manager handles user authentication, JWT lifecycle, and role verification
 type Manager struct {
-	mu              sync.RWMutex
-	adminUser       string
-	adminPassword   string
-	jwtSecret       []byte
-	enrollmentTokens map[string]*EnrollmentToken // token string -> EnrollmentToken
+	store     store.Store
+	jwtSecret []byte
 }
 
-// NewManager initializes the auth manager
-func NewManager(adminUser, adminPassword string, defaultAgentToken string) *Manager {
-	if adminUser == "" {
-		adminUser = "admin"
-	}
-	if adminPassword == "" {
-		adminPassword = "admin"
-	}
-
+// NewManager initializes the auth manager backed by the store
+func NewManager(st store.Store) *Manager {
 	secret := make([]byte, 32)
 	_, _ = rand.Read(secret)
 
-	m := &Manager{
-		adminUser:        adminUser,
-		adminPassword:    adminPassword,
-		jwtSecret:        secret,
-		enrollmentTokens: make(map[string]*EnrollmentToken),
+	return &Manager{
+		store:     st,
+		jwtSecret: secret,
 	}
-
-	// Register default agent token
-	if defaultAgentToken != "" {
-		m.enrollmentTokens[defaultAgentToken] = &EnrollmentToken{
-			ID:        "default",
-			Name:      "Default Shared Token",
-			Token:     defaultAgentToken,
-			CreatedAt: time.Now(),
-			ExpiresAt: time.Now().Add(365 * 24 * time.Hour),
-			Revoked:   false,
-		}
-	}
-
-	return m
 }
 
-// AuthenticateUser verifies admin credentials and generates a JWT
-func (m *Manager) AuthenticateUser(username, password string) (string, error) {
-	if username != m.adminUser || password != m.adminPassword {
-		return "", errors.New("invalid username or password")
+// AuthenticateUser verifies user credentials via the store and generates a JWT with user role
+func (m *Manager) AuthenticateUser(username, password string) (string, *store.User, error) {
+	u, err := m.store.AuthenticateUser(username, password)
+	if err != nil {
+		return "", nil, err
 	}
 
 	claims := JWTClaims{
-		Sub: username,
-		Iat: time.Now().Unix(),
-		Exp: time.Now().Add(24 * time.Hour).Unix(),
+		Sub:  u.Username,
+		Role: u.Role,
+		Iat:  time.Now().Unix(),
+		Exp:  time.Now().Add(24 * time.Hour).Unix(),
 	}
 
-	return m.signJWT(claims)
+	tokenStr, err := m.signJWT(claims)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return tokenStr, u, nil
 }
 
-// VerifyJWT validates a JWT string and returns the subject
-func (m *Manager) VerifyJWT(tokenStr string) (string, error) {
+// VerifyJWT validates a JWT string and returns the user claims (username & role)
+func (m *Manager) VerifyJWT(tokenStr string) (*UserClaims, error) {
 	parts := strings.Split(tokenStr, ".")
 	if len(parts) != 3 {
-		return "", ErrInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	payloadToSign := parts[0] + "." + parts[1]
 	expectedSig := m.hmacSign([]byte(payloadToSign))
 	actualSig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil || !hmac.Equal(expectedSig, actualSig) {
-		return "", ErrInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	claimBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", ErrInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	var claims JWTClaims
 	if err := json.Unmarshal(claimBytes, &claims); err != nil {
-		return "", ErrInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	if time.Now().Unix() > claims.Exp {
-		return "", errors.New("token expired")
+		return nil, errors.New("token expired")
 	}
 
-	return claims.Sub, nil
+	return &UserClaims{
+		Username: claims.Sub,
+		Role:     claims.Role,
+	}, nil
 }
 
-// ValidateAgentToken checks if an enrollment token is valid and not revoked
+// GetStore returns the underlying store
+func (m *Manager) GetStore() store.Store {
+	return m.store
+}
+
+// ValidateAgentToken checks if an enrollment token is valid
 func (m *Manager) ValidateAgentToken(token string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	entry, exists := m.enrollmentTokens[token]
-	if !exists {
-		return false
-	}
-	if entry.Revoked {
-		return false
-	}
-	if !entry.ExpiresAt.IsZero() && time.Now().After(entry.ExpiresAt) {
-		return false
-	}
-	return true
-}
-
-// CreateEnrollmentToken generates a new agent enrollment token
-func (m *Manager) CreateEnrollmentToken(name string, duration time.Duration) *EnrollmentToken {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	randBytes := make([]byte, 24)
-	_, _ = rand.Read(randBytes)
-	tokenStr := "mesh_" + hex.EncodeToString(randBytes)
-
-	expiresAt := time.Time{}
-	if duration > 0 {
-		expiresAt = time.Now().Add(duration)
-	}
-
-	entry := &EnrollmentToken{
-		ID:        fmt.Sprintf("tok_%d", time.Now().UnixNano()),
-		Name:      name,
-		Token:     tokenStr,
-		CreatedAt: time.Now(),
-		ExpiresAt: expiresAt,
-		Revoked:   false,
-	}
-
-	m.enrollmentTokens[tokenStr] = entry
-	return entry
-}
-
-// ListEnrollmentTokens returns all enrollment tokens
-func (m *Manager) ListEnrollmentTokens() []*EnrollmentToken {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	tokens := make([]*EnrollmentToken, 0, len(m.enrollmentTokens))
-	for _, t := range m.enrollmentTokens {
-		copyTok := *t
-		tokens = append(tokens, &copyTok)
-	}
-	return tokens
-}
-
-// RevokeEnrollmentToken marks a token as revoked
-func (m *Manager) RevokeEnrollmentToken(idOrToken string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for k, t := range m.enrollmentTokens {
-		if t.ID == idOrToken || k == idOrToken {
-			t.Revoked = true
-			return true
-		}
-	}
-	return false
+	return m.store.ValidateToken(token)
 }
 
 // Middleware verifies JWT from Authorization header or 'token' query param
@@ -221,16 +140,32 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		user, err := m.VerifyJWT(tokenStr)
+		claims, err := m.VerifyJWT(tokenStr)
 		if err != nil {
 			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 
-		// Attach user to header for downstream handlers if needed
-		r.Header.Set("X-Authenticated-User", user)
+		r.Header.Set("X-Authenticated-User", claims.Username)
+		r.Header.Set("X-Authenticated-Role", claims.Role)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RequireRole enforces role authorization
+func (m *Manager) RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			role := r.Header.Get("X-Authenticated-Role")
+			for _, allowed := range allowedRoles {
+				if role == allowed {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			http.Error(w, "forbidden: your role ("+role+") lacks permission for this action", http.StatusForbidden)
+		})
+	}
 }
 
 func (m *Manager) signJWT(claims JWTClaims) (string, error) {

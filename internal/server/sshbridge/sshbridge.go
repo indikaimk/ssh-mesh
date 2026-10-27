@@ -48,8 +48,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing authentication token", http.StatusUnauthorized)
 			return
 		}
-		if _, err := h.authMgr.VerifyJWT(tokenStr); err != nil {
+		claims, err := h.authMgr.VerifyJWT(tokenStr)
+		if err != nil {
 			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		// Enforce RBAC: viewers cannot open shell sessions
+		if claims.Role == "viewer" {
+			http.Error(w, "forbidden: viewer role has read-only access and cannot open terminal sessions", http.StatusForbidden)
 			return
 		}
 	}

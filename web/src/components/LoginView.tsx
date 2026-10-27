@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Terminal, Lock, User, ArrowRight, ShieldCheck } from 'lucide-react';
 
 interface LoginViewProps {
-  onLoginSuccess: (token: string, user: string) => void;
+  onLoginSuccess: (token: string, user: string, role: string) => void;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
@@ -31,7 +31,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
       const data = await res.json();
       localStorage.setItem('ssh_mesh_jwt', data.token);
       localStorage.setItem('ssh_mesh_user', data.user);
-      onLoginSuccess(data.token, data.user);
+      localStorage.setItem('ssh_mesh_role', data.role || 'operator');
+      onLoginSuccess(data.token, data.user, data.role || 'operator');
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {

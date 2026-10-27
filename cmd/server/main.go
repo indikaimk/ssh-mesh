@@ -16,6 +16,7 @@ import (
 	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/sshbridge"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/store"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/tunnel"
 )
 
@@ -24,14 +25,22 @@ func main() {
 	token := flag.String("token", getEnv("SSH_MESH_TOKEN", "mesh-secret-token"), "Enrollment authentication token for agents")
 	adminUser := flag.String("admin-user", getEnv("SSH_MESH_ADMIN_USER", "admin"), "Admin username for web dashboard")
 	adminPass := flag.String("admin-pass", getEnv("SSH_MESH_ADMIN_PASSWORD", "admin"), "Admin password for web dashboard")
+	dbPath := flag.String("db", getEnv("SSH_MESH_DB_PATH", "./mesh.db"), "Path to SQLite database")
 	webDir := flag.String("web-dir", getEnv("SSH_MESH_WEB_DIR", "./web/dist"), "Path to frontend static assets")
 	flag.Parse()
 
-	// 1. Initialize Auth Manager & Broker
-	authMgr := auth.NewManager(*adminUser, *adminPass, *token)
+	// 1. Initialize Persistent SQLite Store
+	sqlStore, err := store.NewSQLiteStore(*dbPath, *adminUser, *adminPass, *token)
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer sqlStore.Close()
+
+	// 2. Initialize Auth Manager & Broker
+	authMgr := auth.NewManager(sqlStore)
 	sessionBroker := broker.NewMemoryBroker()
 
-	// 2. Initialize Tunnel, Bridge, and API handlers with auth
+	// 3. Initialize Tunnel, Bridge, and API handlers with auth
 	tunnelHandler := tunnel.NewHandler(sessionBroker, authMgr)
 	terminalBridge := sshbridge.NewHandler(sessionBroker, authMgr, *token)
 	restAPI := api.NewServerAPI(sessionBroker, authMgr, "")

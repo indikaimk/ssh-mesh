@@ -38,6 +38,10 @@ func (api *ServerAPI) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/auth/me", api.authMgr.Middleware(http.HandlerFunc(api.handleMe)))
 	mux.Handle("/api/v1/agents", api.authMgr.Middleware(http.HandlerFunc(api.handleAgents)))
 	mux.Handle("/api/v1/tokens", api.authMgr.Middleware(http.HandlerFunc(api.handleTokens)))
+
+	// User management (Admin only)
+	adminOnly := api.authMgr.RequireRole("admin")
+	mux.Handle("/api/v1/users", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleUsers))))
 }
 
 func (api *ServerAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -60,25 +64,28 @@ func (api *ServerAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := api.authMgr.AuthenticateUser(req.Username, req.Password)
+	token, user, err := api.authMgr.AuthenticateUser(req.Username, req.Password)
 	if err != nil {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		http.Error(w, "invalid credentials: "+err.Error(), http.StatusUnauthorized)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"token": token,
-		"user":  req.Username,
+		"user":  user.Username,
+		"role":  user.Role,
 	})
 }
 
 func (api *ServerAPI) handleMe(w http.ResponseWriter, r *http.Request) {
 	setCors(w)
 	user := r.Header.Get("X-Authenticated-User")
+	role := r.Header.Get("X-Authenticated-Role")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"user":  user,
+		"role":  role,
 		"valid": true,
 	})
 }
@@ -102,13 +109,73 @@ func (api *ServerAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
+func (api *ServerAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 	setCors(w)
 	w.Header().Set("Content-Type", "application/json")
+	st := api.authMgr.GetStore()
 
 	switch r.Method {
 	case http.MethodGet:
-		tokens := api.authMgr.ListEnrollmentTokens()
+		users, err := st.ListUsers()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"users": users})
+
+	case http.MethodPost:
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+			Role     string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if req.Username == "" || req.Password == "" {
+			http.Error(w, "username and password are required", http.StatusBadRequest)
+			return
+		}
+		user, err := st.CreateUser(req.Username, req.Password, req.Role)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(user)
+
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "missing user id", http.StatusBadRequest)
+			return
+		}
+		if err := st.DeleteUser(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"deleted": true})
+
+	case http.MethodOptions:
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	w.Header().Set("Content-Type", "application/json")
+	st := api.authMgr.GetStore()
+
+	switch r.Method {
+	case http.MethodGet:
+		tokens, err := st.ListTokens()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"tokens": tokens,
 		})
@@ -123,7 +190,11 @@ func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
 			req.Name = "Custom Token"
 		}
 		duration := time.Duration(req.DurationHours) * time.Hour
-		tokenEntry := api.authMgr.CreateEnrollmentToken(req.Name, duration)
+		tokenEntry, err := st.CreateToken(req.Name, duration)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(tokenEntry)
 
 	case http.MethodDelete:
@@ -132,9 +203,13 @@ func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing token id", http.StatusBadRequest)
 			return
 		}
-		success := api.authMgr.RevokeEnrollmentToken(id)
+		err := st.RevokeToken(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"revoked": success,
+			"revoked": true,
 		})
 
 	case http.MethodOptions:
@@ -172,11 +247,12 @@ func (api *ServerAPI) handleInstallScript(w http.ResponseWriter, r *http.Request
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		// Use first active token or default
-		tokens := api.authMgr.ListEnrollmentTokens()
-		for _, t := range tokens {
-			if !t.Revoked {
-				token = t.Token
-				break
+		if tokens, err := api.authMgr.GetStore().ListTokens(); err == nil {
+			for _, t := range tokens {
+				if !t.Revoked {
+					token = t.Token
+					break
+				}
 			}
 		}
 	}

@@ -3,6 +3,7 @@ import { AgentInfo, TerminalTab } from './types';
 import { TerminalView } from './components/TerminalView';
 import { EnrollModal } from './components/EnrollModal';
 import { LoginView } from './components/LoginView';
+import { UsersModal } from './components/UsersModal';
 import {
   Terminal as TerminalIcon,
   Server,
@@ -15,16 +16,19 @@ import {
   ChevronRight,
   LogOut,
   User,
+  Users,
 } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [authToken, setAuthToken] = useState<string | null>(() => localStorage.getItem('ssh_mesh_jwt'));
   const [currentUser, setCurrentUser] = useState<string>(() => localStorage.getItem('ssh_mesh_user') || 'admin');
+  const [userRole, setUserRole] = useState<string>(() => localStorage.getItem('ssh_mesh_role') || 'operator');
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
+  const [isUsersModalOpen, setIsUsersModalOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Target User prompt modal state
@@ -62,17 +66,27 @@ export const App: React.FC = () => {
     }
   }, [authToken]);
 
-  const handleLoginSuccess = (token: string, user: string) => {
+  const handleLoginSuccess = (token: string, user: string, role: string) => {
     setAuthToken(token);
     setCurrentUser(user);
+    setUserRole(role);
   };
 
   const handleLogout = () => {
     localStorage.removeItem('ssh_mesh_jwt');
     localStorage.removeItem('ssh_mesh_user');
+    localStorage.removeItem('ssh_mesh_role');
     setAuthToken(null);
     setTabs([]);
     setActiveTabId(null);
+  };
+
+  const handleNodeClick = (agent: AgentInfo) => {
+    if (userRole === 'viewer') {
+      alert('Viewer accounts have read-only access and cannot open terminal sessions.');
+      return;
+    }
+    setTargetUserModalAgent(agent);
   };
 
   const openTerminal = (agent: AgentInfo, user?: string) => {
@@ -167,18 +181,53 @@ export const App: React.FC = () => {
             <span>Refresh</span>
           </button>
 
-          <button className="btn btn-primary btn-sm" onClick={() => setIsEnrollModalOpen(true)}>
-            <Plus size={15} />
-            <span>Enroll Node</span>
-          </button>
+          {/* Admin: Users Management */}
+          {userRole === 'admin' && (
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setIsUsersModalOpen(true)}
+              title="Manage Users & Roles"
+            >
+              <Users size={14} />
+              <span>Team & Users</span>
+            </button>
+          )}
+
+          {userRole !== 'viewer' && (
+            <button className="btn btn-primary btn-sm" onClick={() => setIsEnrollModalOpen(true)}>
+              <Plus size={15} />
+              <span>Enroll Node</span>
+            </button>
+          )}
 
           <div style={{ width: '1px', height: '24px', background: 'var(--border-subtle)', margin: '0 4px' }} />
 
           {/* User profile & Logout */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
               <User size={14} color="var(--accent-cyan)" />
-              {currentUser}
+              <span>{currentUser}</span>
+              <span
+                className="badge-tag"
+                style={{
+                  fontSize: '0.68rem',
+                  textTransform: 'uppercase',
+                  background:
+                    userRole === 'admin'
+                      ? 'rgba(168, 85, 247, 0.15)'
+                      : userRole === 'operator'
+                      ? 'rgba(56, 189, 248, 0.15)'
+                      : 'rgba(148, 163, 184, 0.15)',
+                  color:
+                    userRole === 'admin'
+                      ? '#c084fc'
+                      : userRole === 'operator'
+                      ? 'var(--accent-cyan)'
+                      : '#94a3b8',
+                }}
+              >
+                {userRole}
+              </span>
             </span>
             <button
               className="btn btn-secondary btn-sm"
@@ -235,13 +284,15 @@ export const App: React.FC = () => {
                   <div>
                     <Server size={28} style={{ opacity: 0.3, marginBottom: '8px' }} />
                     <p>No agents connected yet.</p>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      style={{ marginTop: '12px' }}
-                      onClick={() => setIsEnrollModalOpen(true)}
-                    >
-                      Connect your first VM
-                    </button>
+                    {userRole !== 'viewer' && (
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ marginTop: '12px' }}
+                        onClick={() => setIsEnrollModalOpen(true)}
+                      >
+                        Connect your first VM
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -252,7 +303,7 @@ export const App: React.FC = () => {
                   <div
                     key={agent.id}
                     className={`node-card ${isCurrentActive ? 'active' : ''}`}
-                    onClick={() => setTargetUserModalAgent(agent)}
+                    onClick={() => handleNodeClick(agent)}
                   >
                     <div className="node-header">
                       <div className="node-hostname">
@@ -335,23 +386,31 @@ export const App: React.FC = () => {
                 Select a connected node from the inventory on the left to launch an encrypted reverse SSH terminal, or enroll a new VM with private IP.
               </p>
               <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => {
-                    if (agents.length > 0) {
-                      setTargetUserModalAgent(agents[0]);
-                    } else {
-                      setIsEnrollModalOpen(true);
-                    }
-                  }}
-                >
-                  <TerminalIcon size={16} />
-                  <span>{agents.length > 0 ? 'Connect to ' + agents[0].hostname : 'Enroll Your First VM'}</span>
-                </button>
-                <button className="btn btn-secondary" onClick={() => setIsEnrollModalOpen(true)}>
-                  <Shield size={16} />
-                  <span>Enroll Instructions</span>
-                </button>
+                {userRole !== 'viewer' ? (
+                  <>
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => {
+                        if (agents.length > 0) {
+                          setTargetUserModalAgent(agents[0]);
+                        } else {
+                          setIsEnrollModalOpen(true);
+                        }
+                      }}
+                    >
+                      <TerminalIcon size={16} />
+                      <span>{agents.length > 0 ? 'Connect to ' + agents[0].hostname : 'Enroll Your First VM'}</span>
+                    </button>
+                    <button className="btn btn-secondary" onClick={() => setIsEnrollModalOpen(true)}>
+                      <Shield size={16} />
+                      <span>Enroll Instructions</span>
+                    </button>
+                  </>
+                ) : (
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>
+                    Your account has <strong>Viewer (Read-Only)</strong> permissions.
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -460,6 +519,14 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Users & Team Modal (Admin only) */}
+      <UsersModal
+        isOpen={isUsersModalOpen}
+        onClose={() => setIsUsersModalOpen(false)}
+        authToken={authToken}
+        currentUsername={currentUser}
+      />
 
       {/* Enroll Modal */}
       <EnrollModal

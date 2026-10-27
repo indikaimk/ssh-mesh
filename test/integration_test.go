@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/sshbridge"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/store"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/tunnel"
 )
 
@@ -23,8 +25,16 @@ func TestEndToEndReverseSSH(t *testing.T) {
 	testToken := "test-secret-token"
 	agentID := "test-vps-node-1"
 
-	// 1. Setup Server
-	authMgr := auth.NewManager("admin", "admin", testToken)
+	// 1. Setup Server with SQLite Store
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	st, err := store.NewSQLiteStore(dbPath, "admin", "admin", testToken)
+	if err != nil {
+		t.Fatalf("Failed to initialize test store: %v", err)
+	}
+	defer st.Close()
+
+	authMgr := auth.NewManager(st)
 	b := broker.NewMemoryBroker()
 	tunnelH := tunnel.NewHandler(b, authMgr)
 	bridgeH := sshbridge.NewHandler(b, authMgr, testToken)
@@ -74,7 +84,7 @@ func TestEndToEndReverseSSH(t *testing.T) {
 	}
 
 	// 3. Authenticate and verify REST API returns agent
-	jwtToken, err := authMgr.AuthenticateUser("admin", "admin")
+	jwtToken, _, err := authMgr.AuthenticateUser("admin", "admin")
 	if err != nil {
 		t.Fatalf("Failed to generate JWT: %v", err)
 	}

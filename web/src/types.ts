@@ -29,3 +29,11 @@ export interface EnrollmentToken {
   expires_at?: string;
   revoked: boolean;
 }
+
+export interface UserAccount {
+  id: string;
+  username: string;
+  role: 'admin' | 'operator' | 'viewer';
+  created_at: string;
+  last_login_at?: string;
+}
