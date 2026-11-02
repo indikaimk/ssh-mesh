@@ -1,0 +1,14 @@
+.git
+.github
+.vscode
+*.code-workspace
+bin/
+data/
+docs/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+web/node_modules/
+web/dist/
+

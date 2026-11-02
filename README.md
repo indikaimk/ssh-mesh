@@ -85,9 +85,16 @@ Open **`http://localhost:8080`** in your browser and sign in with `admin` / `adm
 
 ---
 
-## 🔒 Security & Access Control
+## 🔒 Security, RBAC & Auditing
 
-- **Web Dashboard Authentication**: Protected with HMAC-SHA256 JWT tokens. REST endpoints and WebSocket terminal sessions require authenticated sessions.
+- **Web Dashboard Authentication**: Protected with HMAC-SHA256 JWT tokens and persistent SQLite user storage (`bcrypt` password hashing).
+- **Multi-User RBAC & Tag/Node Access Control**:
+  - **Roles**: `admin` (full control), `operator` (interactive SSH access), and `viewer` (read-only inventory access).
+  - **Granular VM Restrictions**: Restrict users to specific VMs (`node:vps-01`) or VM tags (`env:staging`, `team:backend`) via the visual VM & tag picker.
+- **3-Layer Opt-In Security Auditing & Session Replay** (Admin-controlled, disabled by default):
+  1. **Control-Plane & Session Audit Trail**: Tracks logins, RBAC changes, token events, agent connections, and SSH session durations.
+  2. **SSH Command History Capture**: Logs executed shell commands (`[ubuntu] $ ...`) per user and VM.
+  3. **Full Terminal Session Recording & Replay**: Records sessions in `asciicast` v2 (`.cast`) format with built-in `xterm.js` playback in the dashboard.
 - **Dynamic Enrollment Tokens**: Generate named agent tokens with custom expiration (e.g. 24h, 7d) and one-click revocation from the web dashboard.
 - **Target Linux User Selection**: When launching a terminal, choose to drop privileges to `ubuntu`, `root`, `ec2-user`, or any local Unix user.
 - **Private Subnet Isolation**: Agents only dial **outbound** over port 443/80. No public IPs or inbound firewall rules required on the target VMs.
@@ -96,26 +103,40 @@ Open **`http://localhost:8080`** in your browser and sign in with `admin` / `adm
 On any remote machine with internet access (even behind NAT/firewall):
 
 ```bash
-# Direct binary execution:
+# Direct binary execution (with optional RBAC tags):
 ./bin/ssh-mesh-agent \
   -server "ws://<YOUR_SERVER_HOST>:8080/api/v1/agent/tunnel" \
   -token "mesh-secret-token" \
-  -id "production-db-node-1"
+  -id "production-db-node-1" \
+  -tags "env=production,team=core"
 ```
 
-Or run the one-click installer script:
+Or run the one-click auto-detecting installer script:
 ```bash
-curl -sSL http://<YOUR_SERVER_HOST>:8080/api/v1/install-script | sudo bash
+curl -sSL "http://<YOUR_SERVER_HOST>:8080/api/v1/install-script?token=mesh-secret-token&tags=env=staging,team=backend" | sudo bash
 ```
 
 Once connected, the VM will immediately light up green in the web dashboard! Click on the node to launch an interactive terminal session.
 
 ---
 
-## 🧪 Running Integration Tests
+## 📚 Documentation
 
-Run the complete end-to-end integration test (tests agent dial, reverse tunnel registration, REST API, and interactive shell execution):
+Full documentation is located in the [`docs/`](file:///home/indika/projects/ssh-mesh/docs/) directory (powered by **VitePress** and published to GitHub Pages):
+
+- [**Getting Started & Quickstart**](file:///home/indika/projects/ssh-mesh/docs/getting-started.md)
+- [**Architecture & Reverse Tunnel Design**](file:///home/indika/projects/ssh-mesh/docs/architecture.md)
+- [**RBAC & Tag-Based VM Access Control**](file:///home/indika/projects/ssh-mesh/docs/rbac-and-tags.md)
+- [**Security Auditing, Command Logs & Session Replay**](file:///home/indika/projects/ssh-mesh/docs/auditing-and-replay.md)
+- [**Production Deployment Guide**](file:///home/indika/projects/ssh-mesh/docs/deployment.md)
+- [**REST & WebSocket API Reference**](file:///home/indika/projects/ssh-mesh/docs/api-reference.md)
+
+---
+
+## 🧪 Running Tests
+
+Run the unit and end-to-end integration tests:
 
 ```bash
-go test -v -race ./test/...
+go test -v ./internal/... ./test/...
 ```

@@ -2,13 +2,18 @@ package sshbridge
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
@@ -16,12 +21,71 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const RecordingsDir = "data/recordings"
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow cross-origin for development & browser UI
 	},
 	ReadBufferSize:  32 * 1024,
 	WriteBufferSize: 32 * 1024,
+}
+
+// sessionRecorder writes terminal output frames in asciicast v2 format (.cast)
+type sessionRecorder struct {
+	mu    sync.Mutex
+	file  *os.File
+	start time.Time
+}
+
+func newSessionRecorder(sessionID, title string, cols, rows uint32) (*sessionRecorder, error) {
+	if err := os.MkdirAll(RecordingsDir, 0755); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(RecordingsDir, sessionID+".cast")
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+
+	header := map[string]interface{}{
+		"version":   2,
+		"width":     cols,
+		"height":    rows,
+		"timestamp": time.Now().Unix(),
+		"title":     title,
+	}
+	headerBytes, _ := json.Marshal(header)
+	_, _ = f.Write(append(headerBytes, '\n'))
+
+	return &sessionRecorder{
+		file:  f,
+		start: time.Now(),
+	}, nil
+}
+
+func (sr *sessionRecorder) WriteOutput(data []byte) {
+	if sr == nil || sr.file == nil || len(data) == 0 {
+		return
+	}
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	elapsed := time.Since(sr.start).Seconds()
+	frame := []interface{}{elapsed, "o", string(data)}
+	if raw, err := json.Marshal(frame); err == nil {
+		_, _ = sr.file.Write(append(raw, '\n'))
+	}
+}
+
+func (sr *sessionRecorder) Close() {
+	if sr == nil || sr.file == nil {
+		return
+	}
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	_ = sr.file.Close()
+	sr.file = nil
 }
 
 // Handler handles user terminal sessions coming from the browser (Xterm.js).
@@ -47,6 +111,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	username := "admin"
+	clientIP := r.RemoteAddr
+
 	// Authenticate user via JWT if authMgr is configured
 	if h.authMgr != nil {
 		tokenStr := r.URL.Query().Get("token")
@@ -59,8 +126,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
+		username = claims.Username
+		st := h.authMgr.GetStore()
+
 		// Enforce RBAC: viewers cannot open shell sessions
 		if claims.Role == "viewer" {
+			if st != nil {
+				st.LogEvent(username, "ssh.access_denied", vmID, clientIP, "denied", "Viewer role attempted to open SSH terminal", nil)
+			}
 			http.Error(w, "forbidden: viewer role has read-only access and cannot open terminal sessions", http.StatusForbidden)
 			return
 		}
@@ -71,11 +144,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "agent not found or offline", http.StatusNotFound)
 			return
 		}
-		userRecord, err := h.authMgr.GetStore().GetUser(claims.Username)
-		if err == nil && userRecord != nil && !userRecord.CanAccessNode(agentInfo) {
-			log.Printf("[Terminal Bridge] Access Denied: User '%s' does not have permission to access node '%s'", claims.Username, vmID)
-			http.Error(w, "forbidden: you do not have permission to access this node", http.StatusForbidden)
-			return
+		if st != nil {
+			userRecord, err := st.GetUser(claims.Username)
+			if err == nil && userRecord != nil && !userRecord.CanAccessNode(agentInfo) {
+				log.Printf("[Terminal Bridge] Access Denied: User '%s' does not have permission to access node '%s'", claims.Username, vmID)
+				st.LogEvent(username, "ssh.access_denied", vmID, clientIP, "denied", "Restricted by node/tag RBAC rules", nil)
+				http.Error(w, "forbidden: you do not have permission to access this node", http.StatusForbidden)
+				return
+			}
 		}
 	}
 
@@ -173,18 +249,66 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Initialize session auditing & recording if enabled
+	sessionStart := time.Now()
+	var recorder *sessionRecorder
+	var recordingIDPtr *string
+
+	if h.authMgr != nil && h.authMgr.GetStore() != nil {
+		st := h.authMgr.GetStore()
+		if settings, err := st.GetAuditSettings(); err == nil && settings != nil {
+			if settings.EnableSessionRecording {
+				recID := uuid.New().String()
+				if rec, err := newSessionRecorder(recID, fmt.Sprintf("%s@%s (%s)", username, vmID, targetUser), cols, rows); err == nil {
+					recorder = rec
+					recordingIDPtr = &recID
+				}
+			}
+		}
+		st.LogEvent(
+			username,
+			"ssh.session.start",
+			vmID,
+			clientIP,
+			"success",
+			fmt.Sprintf("Opened SSH session as Linux user '%s'", targetUser),
+			recordingIDPtr,
+		)
+	}
+
+	defer func() {
+		if recorder != nil {
+			recorder.Close()
+		}
+		if h.authMgr != nil && h.authMgr.GetStore() != nil {
+			duration := time.Since(sessionStart).Round(time.Second)
+			h.authMgr.GetStore().LogEvent(
+				username,
+				"ssh.session.end",
+				vmID,
+				clientIP,
+				"success",
+				fmt.Sprintf("Closed SSH session as '%s' (duration: %s)", targetUser, duration),
+				recordingIDPtr,
+			)
+		}
+	}()
+
 	var once sync.Once
 	closeAll := func() {
 		_ = ws.Close()
 		_ = sshSession.Close()
 	}
 
-	// Forward SSH stdout -> WebSocket
+	// Forward SSH stdout -> WebSocket (and optional session recorder)
 	go func() {
 		buf := make([]byte, 8192)
 		for {
 			n, err := stdoutPipe.Read(buf)
 			if n > 0 {
+				if recorder != nil {
+					recorder.WriteOutput(buf[:n])
+				}
 				if writeErr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); writeErr != nil {
 					break
 				}
@@ -196,12 +320,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		once.Do(closeAll)
 	}()
 
-	// Forward SSH stderr -> WebSocket
+	// Forward SSH stderr -> WebSocket (and optional session recorder)
 	go func() {
 		buf := make([]byte, 8192)
 		for {
 			n, err := stderrPipe.Read(buf)
 			if n > 0 {
+				if recorder != nil {
+					recorder.WriteOutput(buf[:n])
+				}
 				if writeErr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); writeErr != nil {
 					break
 				}
@@ -212,6 +339,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		once.Do(closeAll)
 	}()
+
+	// Command buffer for Layer 2 command line auditing
+	var cmdBuf []byte
 
 	// Read from WebSocket -> SSH Stdin (and intercept resize messages)
 	for {
@@ -231,6 +361,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Capture command lines when command logging is enabled
+		if h.authMgr != nil && h.authMgr.GetStore() != nil {
+			cmdBuf = processCommandInput(cmdBuf, msg, func(cmdLine string) {
+				h.authMgr.GetStore().LogEvent(
+					username,
+					"ssh.command",
+					vmID,
+					clientIP,
+					"success",
+					fmt.Sprintf("[%s] $ %s", targetUser, cmdLine),
+					recordingIDPtr,
+				)
+			})
+		}
+
 		// Plain input keystrokes
 		if _, writeErr := stdinPipe.Write(msg); writeErr != nil {
 			break
@@ -238,6 +383,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	once.Do(closeAll)
+}
+
+func processCommandInput(buf []byte, input []byte, onCommand func(string)) []byte {
+	i := 0
+	for i < len(input) {
+		b := input[i]
+		// Skip ANSI escape sequences (e.g. arrow keys \x1b[A)
+		if b == 0x1b {
+			i++
+			if i < len(input) && input[i] == '[' {
+				i++
+				for i < len(input) && (input[i] < 0x40 || input[i] > 0x7e) {
+					i++
+				}
+			}
+			i++
+			continue
+		}
+
+		switch b {
+		case '\r', '\n':
+			line := strings.TrimSpace(string(buf))
+			if line != "" {
+				onCommand(line)
+			}
+			buf = buf[:0]
+		case 0x7f, 0x08: // Backspace / Delete
+			if len(buf) > 0 {
+				buf = buf[:len(buf)-1]
+			}
+		case 0x03, 0x15: // Ctrl+C or Ctrl+U clears current input buffer
+			buf = buf[:0]
+		default:
+			if b >= 0x20 && b < 0x7f {
+				buf = append(buf, b)
+			}
+		}
+		i++
+	}
+	return buf
 }
 
 func init() {

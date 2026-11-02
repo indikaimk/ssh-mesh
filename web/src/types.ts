@@ -38,3 +38,22 @@ export interface UserAccount {
   created_at: string;
   last_login_at?: string;
 }
+
+export interface AuditSettings {
+  enable_audit_log: boolean;
+  enable_command_logging: boolean;
+  enable_session_recording: boolean;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  event_type: string;
+  target: string;
+  client_ip: string;
+  status: 'success' | 'denied';
+  details: string;
+  recording_id?: string;
+}
+

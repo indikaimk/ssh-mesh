@@ -1,0 +1,23 @@
+services:
+  ssh-mesh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/indikaimk/ssh-mesh:latest
+    container_name: ssh-mesh-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SSH_MESH_ADDR: ":8080"
+      SSH_MESH_ADMIN_USER: "${SSH_MESH_ADMIN_USER:-admin}"
+      SSH_MESH_ADMIN_PASSWORD: "${SSH_MESH_ADMIN_PASSWORD:-admin}"
+      SSH_MESH_TOKEN: "${SSH_MESH_TOKEN:-mesh-secret-token}"
+      SSH_MESH_DB_PATH: "/app/data/mesh.db"
+      SSH_MESH_WEB_DIR: "/app/web/dist"
+    volumes:
+      - ssh_mesh_data:/app/data
+
+volumes:
+  ssh_mesh_data:
+

@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -44,6 +45,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Validate token dynamically against auth manager
 	if h.authMgr != nil && !h.authMgr.ValidateAgentToken(token) {
 		log.Printf("[Server Tunnel] Unauthorized connection attempt from %s (invalid or revoked token)", r.RemoteAddr)
+		if st := h.authMgr.GetStore(); st != nil {
+			st.LogEvent("agent", "agent.auth_failed", agentID, r.RemoteAddr, "denied", "Invalid or revoked enrollment token", nil)
+		}
 		http.Error(w, "unauthorized agent token", http.StatusUnauthorized)
 		return
 	}
@@ -108,10 +112,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[Server Tunnel] Agent registered successfully: %s (%s, IP: %s)", agentInfo.ID, agentInfo.Hostname, agentInfo.PrivateIP)
+	if h.authMgr != nil && h.authMgr.GetStore() != nil {
+		h.authMgr.GetStore().LogEvent(
+			"agent",
+			"agent.connect",
+			agentInfo.ID,
+			r.RemoteAddr,
+			"success",
+			fmt.Sprintf("Agent '%s' (%s/%s, IP: %s) connected", agentInfo.Hostname, agentInfo.OS, agentInfo.Arch, agentInfo.PrivateIP),
+			nil,
+		)
+	}
 
 	defer func() {
 		h.broker.Unregister(agentID)
 		log.Printf("[Server Tunnel] Agent disconnected: %s", agentID)
+		if h.authMgr != nil && h.authMgr.GetStore() != nil {
+			h.authMgr.GetStore().LogEvent(
+				"agent",
+				"agent.disconnect",
+				agentInfo.ID,
+				r.RemoteAddr,
+				"success",
+				fmt.Sprintf("Agent '%s' disconnected", agentInfo.Hostname),
+				nil,
+			)
+		}
 	}()
 
 	// Wait until connection closes

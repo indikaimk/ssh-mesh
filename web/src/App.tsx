@@ -4,6 +4,7 @@ import { TerminalView } from './components/TerminalView';
 import { EnrollModal } from './components/EnrollModal';
 import { LoginView } from './components/LoginView';
 import { UsersModal } from './components/UsersModal';
+import { AuditModal } from './components/AuditModal';
 import {
   Terminal as TerminalIcon,
   Server,
@@ -18,6 +19,7 @@ import {
   User,
   Users,
   Tag,
+  FileText,
 } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -30,6 +32,7 @@ export const App: React.FC = () => {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
   const [isUsersModalOpen, setIsUsersModalOpen] = useState(false);
+  const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Target User prompt modal state
@@ -238,16 +241,26 @@ export const App: React.FC = () => {
             <span>Refresh</span>
           </button>
 
-          {/* Admin: Users Management */}
+          {/* Admin: Users & Audit Management */}
           {userRole === 'admin' && (
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => setIsUsersModalOpen(true)}
-              title="Manage Users & Roles"
-            >
-              <Users size={14} />
-              <span>Team & Users</span>
-            </button>
+            <>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setIsAuditModalOpen(true)}
+                title="Audit Logs, Command History & Session Recordings"
+              >
+                <FileText size={14} />
+                <span>Audit & Logs</span>
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setIsUsersModalOpen(true)}
+                title="Manage Users & Roles"
+              >
+                <Users size={14} />
+                <span>Team & Users</span>
+              </button>
+            </>
           )}
 
           {userRole !== 'viewer' && (
@@ -787,6 +800,13 @@ export const App: React.FC = () => {
         authToken={authToken}
         currentUsername={currentUser}
         agents={agents}
+      />
+
+      {/* Security Audit & Session Recordings Modal (Admin only) */}
+      <AuditModal
+        isOpen={isAuditModalOpen}
+        onClose={() => setIsAuditModalOpen(false)}
+        authToken={authToken}
       />
 
       {/* Enroll Modal */}

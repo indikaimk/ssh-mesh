@@ -103,7 +103,27 @@ type EnrollmentToken struct {
 	Revoked   bool    `db:"revoked" json:"revoked"`
 }
 
-// Store defines persistence operations for users and tokens
+// AuditSettings configures the 3 auditing layers (all disabled by default until enabled by Admin)
+type AuditSettings struct {
+	EnableAuditLog         bool `json:"enable_audit_log"`
+	EnableCommandLogging   bool `json:"enable_command_logging"`
+	EnableSessionRecording bool `json:"enable_session_recording"`
+}
+
+// AuditLog represents an audit trail event or recorded terminal command/session
+type AuditLog struct {
+	ID          string  `db:"id" json:"id"`
+	Timestamp   string  `db:"timestamp" json:"timestamp"`
+	Actor       string  `db:"actor" json:"actor"`
+	EventType   string  `db:"event_type" json:"event_type"`
+	Target      string  `db:"target" json:"target"`
+	ClientIP    string  `db:"client_ip" json:"client_ip"`
+	Status      string  `db:"status" json:"status"`
+	Details     string  `db:"details" json:"details"`
+	RecordingID *string `db:"recording_id" json:"recording_id,omitempty"`
+}
+
+// Store defines persistence operations for users, tokens, tags, and auditing
 type Store interface {
 	AuthenticateUser(username, password string) (*User, error)
 	CreateUser(username, password, role, allowedNodes string) (*User, error)
@@ -118,6 +138,12 @@ type Store interface {
 	RevokeToken(id string) error
 	SetNodeTags(agentID string, tags map[string]string) error
 	GetNodeTags(agentID string) (map[string]string, error)
+	GetAuditSettings() (*AuditSettings, error)
+	UpdateAuditSettings(settings *AuditSettings) error
+	AddAuditLog(entry *AuditLog) error
+	LogEvent(actor, eventType, target, clientIP, status, details string, recordingID *string)
+	ListAuditLogs(limit int, eventType, actor, target string) ([]*AuditLog, error)
+	ClearAuditLogs() error
 	Close() error
 }
 
@@ -192,6 +218,23 @@ func (s *SQLiteStore) migrate() error {
 	CREATE TABLE IF NOT EXISTS node_tags (
 		agent_id TEXT PRIMARY KEY,
 		tags TEXT NOT NULL DEFAULT '{}'
+	);
+
+	CREATE TABLE IF NOT EXISTS system_settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS audit_logs (
+		id TEXT PRIMARY KEY,
+		timestamp TEXT NOT NULL,
+		actor TEXT NOT NULL,
+		event_type TEXT NOT NULL,
+		target TEXT NOT NULL DEFAULT '',
+		client_ip TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'success',
+		details TEXT NOT NULL DEFAULT '',
+		recording_id TEXT
 	);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
@@ -531,6 +574,145 @@ func (s *SQLiteStore) GetNodeTags(agentID string) (map[string]string, error) {
 		return nil, err
 	}
 	return tags, nil
+}
+
+func (s *SQLiteStore) GetAuditSettings() (*AuditSettings, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var raw string
+	err := s.db.Get(&raw, "SELECT value FROM system_settings WHERE key = 'audit_settings'")
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Disabled by default until enabled by Admin
+			return &AuditSettings{
+				EnableAuditLog:         false,
+				EnableCommandLogging:   false,
+				EnableSessionRecording: false,
+			}, nil
+		}
+		return nil, err
+	}
+
+	var settings AuditSettings
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		return nil, err
+	}
+	return &settings, nil
+}
+
+func (s *SQLiteStore) UpdateAuditSettings(settings *AuditSettings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if settings == nil {
+		settings = &AuditSettings{}
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO system_settings (key, value) VALUES ('audit_settings', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, string(raw))
+	return err
+}
+
+func (s *SQLiteStore) AddAuditLog(entry *AuditLog) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if entry.ID == "" {
+		entry.ID = uuid.New().String()
+	}
+	if entry.Timestamp == "" {
+		entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+	if entry.Status == "" {
+		entry.Status = "success"
+	}
+
+	_, err := s.db.NamedExec(`
+		INSERT INTO audit_logs (id, timestamp, actor, event_type, target, client_ip, status, details, recording_id)
+		VALUES (:id, :timestamp, :actor, :event_type, :target, :client_ip, :status, :details, :recording_id)
+	`, entry)
+	return err
+}
+
+// LogEvent checks whether the relevant audit layer is enabled and records the event if so
+func (s *SQLiteStore) LogEvent(actor, eventType, target, clientIP, status, details string, recordingID *string) {
+	settings, err := s.GetAuditSettings()
+	if err != nil || settings == nil {
+		return
+	}
+
+	if eventType == "ssh.command" {
+		if !settings.EnableCommandLogging {
+			return
+		}
+	} else if strings.HasPrefix(eventType, "ssh.session.") {
+		if !settings.EnableAuditLog && !settings.EnableSessionRecording {
+			return
+		}
+	} else {
+		if !settings.EnableAuditLog {
+			return
+		}
+	}
+
+	_ = s.AddAuditLog(&AuditLog{
+		Actor:       actor,
+		EventType:   eventType,
+		Target:      target,
+		ClientIP:    clientIP,
+		Status:      status,
+		Details:     details,
+		RecordingID: recordingID,
+	})
+}
+
+func (s *SQLiteStore) ListAuditLogs(limit int, eventType, actor, target string) ([]*AuditLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+
+	query := "SELECT * FROM audit_logs WHERE 1=1"
+	var args []interface{}
+
+	if eventType != "" {
+		query += " AND event_type LIKE ?"
+		args = append(args, eventType+"%")
+	}
+	if actor != "" {
+		query += " AND actor LIKE ?"
+		args = append(args, "%"+actor+"%")
+	}
+	if target != "" {
+		query += " AND target LIKE ?"
+		args = append(args, "%"+target+"%")
+	}
+
+	query += " ORDER BY timestamp DESC LIMIT ?"
+	args = append(args, limit)
+
+	var logs []*AuditLog
+	if err := s.db.Select(&logs, query, args...); err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
+func (s *SQLiteStore) ClearAuditLogs() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM audit_logs")
+	return err
 }
 
 func (s *SQLiteStore) Close() error {

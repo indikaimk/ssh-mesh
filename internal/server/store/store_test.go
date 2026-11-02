@@ -99,4 +99,35 @@ func TestStoreUserCRUDWithSqlx(t *testing.T) {
 	if tags["env"] != "staging" || tags["team"] != "backend" {
 		t.Fatalf("Unexpected node tags: %+v", tags)
 	}
+
+	// Verify audit settings are disabled by default
+	settings, err := st.GetAuditSettings()
+	if err != nil {
+		t.Fatalf("GetAuditSettings failed: %v", err)
+	}
+	if settings.EnableAuditLog || settings.EnableCommandLogging || settings.EnableSessionRecording {
+		t.Fatalf("Expected all audit settings to be disabled by default, got %+v", settings)
+	}
+
+	// LogEvent should be a no-op when disabled
+	st.LogEvent("admin", "auth.login", "admin", "127.0.0.1", "success", "Login", nil)
+	logs, err := st.ListAuditLogs(50, "", "", "")
+	if err != nil || len(logs) != 0 {
+		t.Fatalf("Expected 0 audit logs when disabled, got %d (err: %v)", len(logs), err)
+	}
+
+	// Enable audit log and command logging
+	if err := st.UpdateAuditSettings(&AuditSettings{
+		EnableAuditLog:         true,
+		EnableCommandLogging:   true,
+		EnableSessionRecording: false,
+	}); err != nil {
+		t.Fatalf("UpdateAuditSettings failed: %v", err)
+	}
+
+	st.LogEvent("dev_sarah", "ssh.command", "vps-01", "127.0.0.1", "success", "[ubuntu] $ ls -la", nil)
+	logs, err = st.ListAuditLogs(50, "ssh.command", "dev_sarah", "vps-01")
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("Expected 1 command audit log after enabling, got %d (err: %v)", len(logs), err)
+	}
 }

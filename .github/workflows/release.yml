@@ -1,0 +1,140 @@
+name: Release Binaries & Docker Image
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.0)'
+        required: false
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-binaries:
+    name: Build Cross-Platform Release Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Build Web Dashboard
+        working-directory: web
+        run: |
+          npm install
+          npm run build
+
+      - name: Build Cross-Platform Agent & Server Artifacts
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          VERSION="${GITHUB_REF_NAME:-v0.1.0}"
+          mkdir -p release/agents bin/dist
+
+          # 1. Build static agent binaries
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%%/*}"
+            arch="${target##*/}"
+            echo "Building agent for ${os}/${arch}..."
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build \
+              -ldflags="-s -w" \
+              -o "bin/dist/ssh-mesh-agent-${os}-${arch}" \
+              ./cmd/agent
+            cp "bin/dist/ssh-mesh-agent-${os}-${arch}" "release/ssh-mesh-agent-${os}-${arch}"
+          done
+
+          # 2. Build packaged control-plane server bundles (includes server binary, web UI, and agent dist binaries)
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%%/*}"
+            arch="${target##*/}"
+            bundle_dir="release/ssh-mesh-${VERSION}-${os}-${arch}"
+            mkdir -p "${bundle_dir}/bin/dist" "${bundle_dir}/web"
+
+            echo "Building server bundle for ${os}/${arch}..."
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build \
+              -ldflags="-s -w" \
+              -o "${bundle_dir}/bin/ssh-mesh-server" \
+              ./cmd/server
+
+            cp "${bundle_dir}/bin/ssh-mesh-server" "release/ssh-mesh-server-${os}-${arch}"
+            cp -r bin/dist/* "${bundle_dir}/bin/dist/"
+            cp -r web/dist "${bundle_dir}/web/dist"
+            cp README.md "${bundle_dir}/"
+
+            tar -C release -czf "release/ssh-mesh-${VERSION}-${os}-${arch}.tar.gz" "ssh-mesh-${VERSION}-${os}-${arch}"
+            rm -rf "${bundle_dir}"
+          done
+
+          # 3. Generate SHA256 checksums
+          cd release
+          sha256sum ssh-mesh-* > SHA256SUMS
+          ls -lh
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/ssh-mesh-agent-*
+            release/ssh-mesh-server-*
+            release/ssh-mesh-*.tar.gz
+            release/SHA256SUMS
+
+  publish-docker:
+    name: Build & Push Multi-Arch Docker Image (GHCR)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (ghcr.io)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+

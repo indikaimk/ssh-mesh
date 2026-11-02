@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/auth"
 	"github.com/ssh-mesh/ssh-mesh/internal/server/broker"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/sshbridge"
+	"github.com/ssh-mesh/ssh-mesh/internal/server/store"
 )
 
 // ServerAPI provides REST endpoints for the web UI.
@@ -43,10 +46,13 @@ func (api *ServerAPI) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/agents", api.authMgr.Middleware(http.HandlerFunc(api.handleAgents)))
 	mux.Handle("/api/v1/tokens", api.authMgr.Middleware(http.HandlerFunc(api.handleTokens)))
 
-	// User and node tag management (Admin only)
+	// User, node tag, and audit management (Admin only)
 	adminOnly := api.authMgr.RequireRole("admin")
 	mux.Handle("/api/v1/users", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleUsers))))
 	mux.Handle("/api/v1/agents/tags", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleAgentTags))))
+	mux.Handle("/api/v1/audit/settings", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleAuditSettings))))
+	mux.Handle("/api/v1/audit/logs", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleAuditLogs))))
+	mux.Handle("/api/v1/audit/recordings", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleAuditRecordings))))
 }
 
 func (api *ServerAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -71,8 +77,15 @@ func (api *ServerAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	token, user, err := api.authMgr.AuthenticateUser(req.Username, req.Password)
 	if err != nil {
+		if st := api.authMgr.GetStore(); st != nil {
+			st.LogEvent(req.Username, "auth.login", req.Username, r.RemoteAddr, "denied", "Failed login attempt", nil)
+		}
 		http.Error(w, "invalid credentials: "+err.Error(), http.StatusUnauthorized)
 		return
+	}
+
+	if st := api.authMgr.GetStore(); st != nil {
+		st.LogEvent(user.Username, "auth.login", user.Username, r.RemoteAddr, "success", fmt.Sprintf("User logged in (role: %s)", user.Role), nil)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -162,6 +175,9 @@ func (api *ServerAPI) handleAgentTags(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		actor := r.Header.Get("X-Authenticated-User")
+		tagsJSON, _ := json.Marshal(cleanTags)
+		st.LogEvent(actor, "node.tags", req.AgentID, r.RemoteAddr, "success", fmt.Sprintf("Updated VM tags: %s", string(tagsJSON)), nil)
 	}
 	_ = api.broker.UpdateTags(req.AgentID, cleanTags)
 
@@ -177,6 +193,7 @@ func (api *ServerAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 	setCors(w)
 	w.Header().Set("Content-Type", "application/json")
 	st := api.authMgr.GetStore()
+	actor := r.Header.Get("X-Authenticated-User")
 
 	switch r.Method {
 	case http.MethodGet:
@@ -207,6 +224,7 @@ func (api *ServerAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		st.LogEvent(actor, "user.create", user.Username, r.RemoteAddr, "success", fmt.Sprintf("Created user '%s' (role: %s, allowed_nodes: %s)", user.Username, user.Role, user.AllowedNodes), nil)
 		_ = json.NewEncoder(w).Encode(user)
 
 	case http.MethodPut:
@@ -223,6 +241,7 @@ func (api *ServerAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		st.LogEvent(actor, "user.update", req.ID, r.RemoteAddr, "success", fmt.Sprintf("Updated user access (role: %s, allowed_nodes: %s)", req.Role, req.AllowedNodes), nil)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"updated": true})
 
 	case http.MethodDelete:
@@ -235,6 +254,7 @@ func (api *ServerAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		st.LogEvent(actor, "user.delete", id, r.RemoteAddr, "success", "Deleted user account", nil)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"deleted": true})
 
 	case http.MethodOptions:
@@ -249,6 +269,7 @@ func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
 	setCors(w)
 	w.Header().Set("Content-Type", "application/json")
 	st := api.authMgr.GetStore()
+	actor := r.Header.Get("X-Authenticated-User")
 
 	switch r.Method {
 	case http.MethodGet:
@@ -276,6 +297,7 @@ func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		st.LogEvent(actor, "token.create", tokenEntry.Name, r.RemoteAddr, "success", fmt.Sprintf("Created enrollment token '%s'", tokenEntry.Name), nil)
 		_ = json.NewEncoder(w).Encode(tokenEntry)
 
 	case http.MethodDelete:
@@ -289,6 +311,7 @@ func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		st.LogEvent(actor, "token.revoke", id, r.RemoteAddr, "success", "Revoked enrollment token", nil)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"revoked": true,
 		})
@@ -299,6 +322,120 @@ func (api *ServerAPI) handleTokens(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (api *ServerAPI) handleAuditSettings(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	w.Header().Set("Content-Type", "application/json")
+	st := api.authMgr.GetStore()
+
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := st.GetAuditSettings()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(settings)
+
+	case http.MethodPut, http.MethodPost:
+		var settings store.AuditSettings
+		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := st.UpdateAuditSettings(&settings); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		actor := r.Header.Get("X-Authenticated-User")
+		_ = st.AddAuditLog(&store.AuditLog{
+			Actor:     actor,
+			EventType: "audit.settings",
+			Target:    "system",
+			ClientIP:  r.RemoteAddr,
+			Status:    "success",
+			Details:   fmt.Sprintf("Audit settings updated: audit_log=%v, command_logging=%v, session_recording=%v", settings.EnableAuditLog, settings.EnableCommandLogging, settings.EnableSessionRecording),
+		})
+		_ = json.NewEncoder(w).Encode(settings)
+
+	case http.MethodOptions:
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (api *ServerAPI) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	w.Header().Set("Content-Type", "application/json")
+	st := api.authMgr.GetStore()
+
+	switch r.Method {
+	case http.MethodGet:
+		limit := 200
+		if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 {
+			limit = l
+		}
+		eventType := r.URL.Query().Get("event_type")
+		actor := r.URL.Query().Get("actor")
+		target := r.URL.Query().Get("target")
+
+		logs, err := st.ListAuditLogs(limit, eventType, actor, target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if logs == nil {
+			logs = []*store.AuditLog{}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"logs":  logs,
+			"count": len(logs),
+		})
+
+	case http.MethodDelete:
+		if err := st.ClearAuditLogs(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = os.RemoveAll(sshbridge.RecordingsDir)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"cleared": true})
+
+	case http.MethodOptions:
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (api *ServerAPI) handleAuditRecordings(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := filepath.Base(r.URL.Query().Get("id"))
+	if id == "" || id == "." || id == "/" {
+		http.Error(w, "missing recording id", http.StatusBadRequest)
+		return
+	}
+
+	path := filepath.Join(sshbridge.RecordingsDir, id+".cast")
+	if _, err := os.Stat(path); err != nil {
+		http.Error(w, "recording not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	http.ServeFile(w, r, path)
 }
 
 func (api *ServerAPI) handleHealth(w http.ResponseWriter, r *http.Request) {
