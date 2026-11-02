@@ -186,11 +186,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer stream.Close()
 
+	sshPassword := h.sharedToken
+	if info, err := h.broker.Get(vmID); err == nil && info.Token != "" {
+		sshPassword = info.Token
+	}
+
 	// Connect SSH client over this stream with specified targetUser
 	sshConfig := &ssh.ClientConfig{
 		User: targetUser,
 		Auth: []ssh.AuthMethod{
-			ssh.Password(h.sharedToken),
+			ssh.Password(sshPassword),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,

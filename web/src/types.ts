@@ -57,3 +57,13 @@ export interface AuditLogEntry {
   recording_id?: string;
 }
 
+export interface FileEntry {
+  name: string;
+  path: string;
+  size: number;
+  mode: string;
+  mod_time: string;
+  is_dir: boolean;
+}
+
+

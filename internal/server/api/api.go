@@ -46,6 +46,13 @@ func (api *ServerAPI) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/agents", api.authMgr.Middleware(http.HandlerFunc(api.handleAgents)))
 	mux.Handle("/api/v1/tokens", api.authMgr.Middleware(http.HandlerFunc(api.handleTokens)))
 
+	// File transfer routes (JWT verified via header or ?token= query param)
+	mux.HandleFunc("/api/v1/files/list", api.handleFilesList)
+	mux.HandleFunc("/api/v1/files/download", api.handleFilesDownload)
+	mux.HandleFunc("/api/v1/files/upload", api.handleFilesUpload)
+	mux.HandleFunc("/api/v1/files/mkdir", api.handleFilesMkdir)
+	mux.HandleFunc("/api/v1/files", api.handleFilesDelete)
+
 	// User, node tag, and audit management (Admin only)
 	adminOnly := api.authMgr.RequireRole("admin")
 	mux.Handle("/api/v1/users", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleUsers))))

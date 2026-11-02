@@ -261,7 +261,12 @@ export const AuditModal: React.FC<AuditModalProps> = ({ isOpen, onClose, authTok
   if (!isOpen) return null;
 
   const filteredLogs = logs.filter((entry) => {
-    if (category === 'ssh.session' && !entry.event_type.startsWith('ssh.session') && entry.event_type !== 'ssh.access_denied') {
+    if (
+      category === 'ssh.session' &&
+      !entry.event_type.startsWith('ssh.session') &&
+      entry.event_type !== 'ssh.access_denied' &&
+      !entry.event_type.startsWith('file.')
+    ) {
       return false;
     }
     if (category === 'ssh.command' && entry.event_type !== 'ssh.command') {

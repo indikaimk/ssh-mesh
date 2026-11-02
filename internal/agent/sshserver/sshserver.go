@@ -1,9 +1,11 @@
 package sshserver
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,10 +13,15 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
+	"github.com/ssh-mesh/ssh-mesh/internal/protocol"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -113,7 +120,8 @@ func (s *Server) HandleConn(netConn net.Conn) {
 	go ssh.DiscardRequests(reqs)
 
 	for newChannel := range chans {
-		if newChannel.ChannelType() != "session" {
+		chType := newChannel.ChannelType()
+		if chType != "session" && chType != "mesh-fs" {
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
 			continue
 		}
@@ -124,8 +132,150 @@ func (s *Server) HandleConn(netConn net.Conn) {
 			return
 		}
 
+		if chType == "mesh-fs" {
+			go ssh.DiscardRequests(requests)
+			go s.handleFileChannel(channel)
+			continue
+		}
+
 		go s.handleSession(channel, requests, sshConn.User())
 	}
+}
+
+func (s *Server) handleFileChannel(channel ssh.Channel) {
+	defer channel.Close()
+
+	reader := bufio.NewReader(channel)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return
+	}
+
+	var req protocol.FileOpRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: "invalid request json"})
+		return
+	}
+
+	targetPath := strings.TrimSpace(req.Path)
+	if targetPath == "" || targetPath == "~" || targetPath == "." {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			targetPath = home
+		} else if cwd, err := os.Getwd(); err == nil {
+			targetPath = cwd
+		} else {
+			targetPath = "/"
+		}
+	}
+	if abs, err := filepath.Abs(targetPath); err == nil {
+		targetPath = abs
+	}
+
+	switch req.Op {
+	case "list":
+		dirEntries, err := os.ReadDir(targetPath)
+		if err != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: err.Error(), Cwd: targetPath})
+			return
+		}
+		entries := make([]protocol.FileEntry, 0, len(dirEntries))
+		for _, de := range dirEntries {
+			info, infoErr := de.Info()
+			var size int64
+			var modeStr string
+			var modTimeStr string
+			if infoErr == nil && info != nil {
+				size = info.Size()
+				modeStr = info.Mode().String()
+				modTimeStr = info.ModTime().UTC().Format(time.RFC3339)
+			}
+			entries = append(entries, protocol.FileEntry{
+				Name:    de.Name(),
+				Path:    filepath.Join(targetPath, de.Name()),
+				Size:    size,
+				Mode:    modeStr,
+				ModTime: modTimeStr,
+				IsDir:   de.IsDir(),
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].IsDir != entries[j].IsDir {
+				return entries[i].IsDir
+			}
+			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		})
+		writeFileResp(channel, protocol.FileOpResponse{
+			OK:      true,
+			Cwd:     targetPath,
+			Entries: entries,
+		})
+
+	case "download":
+		info, err := os.Stat(targetPath)
+		if err != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: err.Error()})
+			return
+		}
+		if info.IsDir() {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: "cannot download a directory"})
+			return
+		}
+		f, err := os.Open(targetPath)
+		if err != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: err.Error()})
+			return
+		}
+		defer f.Close()
+
+		writeFileResp(channel, protocol.FileOpResponse{OK: true, Size: info.Size(), Cwd: targetPath})
+		_, _ = io.Copy(channel, f)
+
+	case "upload":
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: err.Error()})
+			return
+		}
+		f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: err.Error()})
+			return
+		}
+		// Acknowledge ready to receive file stream
+		writeFileResp(channel, protocol.FileOpResponse{OK: true, Cwd: targetPath})
+		written, copyErr := io.Copy(f, reader)
+		_ = f.Close()
+		if copyErr != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: copyErr.Error()})
+			return
+		}
+		writeFileResp(channel, protocol.FileOpResponse{OK: true, Size: written, Cwd: targetPath})
+
+	case "mkdir":
+		if err := os.MkdirAll(targetPath, 0755); err != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: err.Error()})
+			return
+		}
+		writeFileResp(channel, protocol.FileOpResponse{OK: true, Cwd: targetPath})
+
+	case "delete":
+		if targetPath == "/" || targetPath == "" {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: "refusing to delete root directory"})
+			return
+		}
+		if err := os.RemoveAll(targetPath); err != nil {
+			writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: err.Error()})
+			return
+		}
+		writeFileResp(channel, protocol.FileOpResponse{OK: true, Cwd: targetPath})
+
+	default:
+		writeFileResp(channel, protocol.FileOpResponse{OK: false, Error: "unknown file operation: " + req.Op})
+	}
+}
+
+func writeFileResp(w io.Writer, resp protocol.FileOpResponse) {
+	raw, _ := json.Marshal(resp)
+	_, _ = w.Write(append(raw, '\n'))
 }
 
 func (s *Server) handleSession(channel ssh.Channel, requests <-chan *ssh.Request, targetUser string) {

@@ -105,6 +105,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Tags:      mergedTags,
 		Version:   reg.Version,
 		Status:    "online",
+		Token:     token,
 	}
 
 	if err := h.broker.Register(agentInfo, session); err != nil {

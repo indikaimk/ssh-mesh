@@ -3,15 +3,20 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { TerminalTab } from '../types';
-import { RefreshCw, Trash2, Maximize2, Minimize2 } from 'lucide-react';
+import { RefreshCw, Trash2, Maximize2, Minimize2, Folder } from 'lucide-react';
 
 interface TerminalViewProps {
   tab: TerminalTab;
   authToken?: string;
   onClose: (tabId: string) => void;
+  onOpenFiles?: (vmId: string, hostname: string) => void;
 }
 
-export const TerminalView: React.FC<TerminalViewProps> = ({ tab, authToken = localStorage.getItem('ssh_mesh_jwt') || '' }) => {
+export const TerminalView: React.FC<TerminalViewProps> = ({
+  tab,
+  authToken = localStorage.getItem('ssh_mesh_jwt') || '',
+  onOpenFiles,
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -221,6 +226,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({ tab, authToken = loc
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {onOpenFiles && (
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => onOpenFiles(tab.agentId, tab.hostname)}
+              title="Browse, Upload & Download Files on this VM"
+            >
+              <Folder size={13} />
+              <span>Files</span>
+            </button>
+          )}
           <button
             className="btn btn-secondary btn-sm"
             onClick={handleReconnect}

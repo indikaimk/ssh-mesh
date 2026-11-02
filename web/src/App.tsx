@@ -5,6 +5,7 @@ import { EnrollModal } from './components/EnrollModal';
 import { LoginView } from './components/LoginView';
 import { UsersModal } from './components/UsersModal';
 import { AuditModal } from './components/AuditModal';
+import { FileManagerModal } from './components/FileManagerModal';
 import {
   Terminal as TerminalIcon,
   Server,
@@ -20,6 +21,7 @@ import {
   Users,
   Tag,
   FileText,
+  Folder,
 } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -33,6 +35,7 @@ export const App: React.FC = () => {
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
   const [isUsersModalOpen, setIsUsersModalOpen] = useState(false);
   const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
+  const [fileManagerTarget, setFileManagerTarget] = useState<{ vmId: string; hostname: string } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Target User prompt modal state
@@ -381,6 +384,18 @@ export const App: React.FC = () => {
                         <span>{agent.hostname}</span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <button
+                          type="button"
+                          className="tab-close"
+                          title="Browse & Transfer Files"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFileManagerTarget({ vmId: agent.id, hostname: agent.hostname });
+                          }}
+                          style={{ padding: '3px', color: 'var(--accent-cyan)' }}
+                        >
+                          <Folder size={13} />
+                        </button>
                         {userRole === 'admin' && (
                           <button
                             type="button"
@@ -474,6 +489,7 @@ export const App: React.FC = () => {
                   tab={activeTab}
                   authToken={authToken}
                   onClose={closeTab}
+                  onOpenFiles={(vmId, hostname) => setFileManagerTarget({ vmId, hostname })}
                 />
               )}
             </>
@@ -808,6 +824,18 @@ export const App: React.FC = () => {
         onClose={() => setIsAuditModalOpen(false)}
         authToken={authToken}
       />
+
+      {/* File Manager Modal */}
+      {fileManagerTarget && (
+        <FileManagerModal
+          isOpen={true}
+          onClose={() => setFileManagerTarget(null)}
+          vmId={fileManagerTarget.vmId}
+          hostname={fileManagerTarget.hostname}
+          authToken={authToken}
+          userRole={userRole}
+        />
+      )}
 
       {/* Enroll Modal */}
       <EnrollModal
