@@ -43,9 +43,10 @@ func (api *ServerAPI) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/agents", api.authMgr.Middleware(http.HandlerFunc(api.handleAgents)))
 	mux.Handle("/api/v1/tokens", api.authMgr.Middleware(http.HandlerFunc(api.handleTokens)))
 
-	// User management (Admin only)
+	// User and node tag management (Admin only)
 	adminOnly := api.authMgr.RequireRole("admin")
 	mux.Handle("/api/v1/users", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleUsers))))
+	mux.Handle("/api/v1/agents/tags", api.authMgr.Middleware(adminOnly(http.HandlerFunc(api.handleAgentTags))))
 }
 
 func (api *ServerAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +121,55 @@ func (api *ServerAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"agents": agents,
 		"count":  len(agents),
+	})
+}
+
+func (api *ServerAPI) handleAgentTags(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		AgentID string            `json:"agent_id"`
+		Tags    map[string]string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.AgentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+
+	cleanTags := make(map[string]string)
+	for k, v := range req.Tags {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k != "" {
+			cleanTags[k] = v
+		}
+	}
+
+	if st := api.authMgr.GetStore(); st != nil {
+		if err := st.SetNodeTags(req.AgentID, cleanTags); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	_ = api.broker.UpdateTags(req.AgentID, cleanTags)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"updated":  true,
+		"agent_id": req.AgentID,
+		"tags":     cleanTags,
 	})
 }
 
@@ -333,6 +383,12 @@ func (api *ServerAPI) handleInstallScript(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	tags := strings.TrimSpace(r.URL.Query().Get("tags"))
+	tagsFlag := ""
+	if tags != "" {
+		tagsFlag = fmt.Sprintf(` -tags "%s"`, strings.ReplaceAll(tags, `"`, ``))
+	}
+
 	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 
@@ -387,7 +443,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_DIR}/ssh-mesh-agent -server "${SERVER_TUNNEL}" -token "${TOKEN}"
+ExecStart=${INSTALL_DIR}/ssh-mesh-agent -server "${SERVER_TUNNEL}" -token "${TOKEN}"%s
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -402,19 +458,19 @@ EOF
   echo "Node is now connected to ${SERVER_TUNNEL}!"
 else
   echo "[3/3] Systemd not found. You can run the agent in the background:"
-  echo "nohup ${INSTALL_DIR}/ssh-mesh-agent -server '${SERVER_TUNNEL}' -token '${TOKEN}' > /tmp/ssh-mesh-agent.log 2>&1 &"
+  echo "nohup ${INSTALL_DIR}/ssh-mesh-agent -server '${SERVER_TUNNEL}' -token '${TOKEN}'%s > /tmp/ssh-mesh-agent.log 2>&1 &"
 fi
 
 echo "=========================================================="
 echo "  Installation Complete!"
 echo "=========================================================="
-`, serverHTTP, tunnelURL, token)
+`, serverHTTP, tunnelURL, token, tagsFlag, tagsFlag)
 
 	_, _ = w.Write([]byte(strings.TrimSpace(script) + "\n"))
 }
 
 func setCors(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }

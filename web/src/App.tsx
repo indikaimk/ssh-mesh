@@ -17,6 +17,7 @@ import {
   LogOut,
   User,
   Users,
+  Tag,
 } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -35,6 +36,56 @@ export const App: React.FC = () => {
   const [targetUserModalAgent, setTargetUserModalAgent] = useState<AgentInfo | null>(null);
   const [selectedUser, setSelectedUser] = useState<string>('default');
   const [customUser, setCustomUser] = useState<string>('');
+
+  // Node Tag management modal state (Admin)
+  const [tagModalAgent, setTagModalAgent] = useState<AgentInfo | null>(null);
+  const [editingTags, setEditingTags] = useState<Record<string, string>>({});
+  const [newTagKey, setNewTagKey] = useState('');
+  const [newTagValue, setNewTagValue] = useState('');
+  const [isSavingTags, setIsSavingTags] = useState(false);
+
+  const openTagModal = (e: React.MouseEvent, agent: AgentInfo) => {
+    e.stopPropagation();
+    setTagModalAgent(agent);
+    setEditingTags({ ...(agent.tags || {}) });
+    setNewTagKey('');
+    setNewTagValue('');
+  };
+
+  const handleSaveNodeTags = async () => {
+    if (!tagModalAgent || !authToken) return;
+    setIsSavingTags(true);
+
+    const updatedTags = { ...editingTags };
+    if (newTagKey.trim() && newTagValue.trim()) {
+      updatedTags[newTagKey.trim()] = newTagValue.trim();
+    }
+
+    try {
+      const res = await fetch('/api/v1/agents/tags', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          agent_id: tagModalAgent.id,
+          tags: updatedTags,
+        }),
+      });
+      if (res.ok) {
+        setTagModalAgent(null);
+        await fetchAgents();
+      } else {
+        const text = await res.text();
+        alert(text || 'Failed to update node tags');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Failed to save tags');
+    } finally {
+      setIsSavingTags(false);
+    }
+  };
 
   const fetchAgents = async () => {
     if (!authToken) return;
@@ -129,11 +180,17 @@ export const App: React.FC = () => {
 
   const filteredAgents = agents.filter((a) => {
     const q = searchQuery.toLowerCase();
+    const tagMatch =
+      a.tags &&
+      Object.entries(a.tags).some(
+        ([k, v]) => k.toLowerCase().includes(q) || v.toLowerCase().includes(q) || `${k}:${v}`.toLowerCase().includes(q) || `${k}=${v}`.toLowerCase().includes(q)
+      );
     return (
       a.hostname.toLowerCase().includes(q) ||
       a.private_ip.toLowerCase().includes(q) ||
       a.id.toLowerCase().includes(q) ||
-      a.os.toLowerCase().includes(q)
+      a.os.toLowerCase().includes(q) ||
+      Boolean(tagMatch)
     );
   });
 
@@ -310,12 +367,44 @@ export const App: React.FC = () => {
                         <span className={`status-dot ${agent.status}`} />
                         <span>{agent.hostname}</span>
                       </div>
-                      <ChevronRight size={15} color="var(--text-dim)" />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        {userRole === 'admin' && (
+                          <button
+                            type="button"
+                            className="tab-close"
+                            title="Manage VM Tags"
+                            onClick={(e) => openTagModal(e, agent)}
+                            style={{ padding: '3px', color: 'var(--text-dim)' }}
+                          >
+                            <Tag size={13} />
+                          </button>
+                        )}
+                        <ChevronRight size={15} color="var(--text-dim)" />
+                      </div>
                     </div>
 
                     <div className="node-ip-row">
                       <span>{agent.private_ip}</span>
                     </div>
+
+                    {agent.tags && Object.keys(agent.tags).length > 0 && (
+                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginTop: '6px' }}>
+                        {Object.entries(agent.tags).map(([k, v]) => (
+                          <span
+                            key={k}
+                            className="meta-chip"
+                            style={{
+                              color: '#c084fc',
+                              borderColor: 'rgba(168, 85, 247, 0.35)',
+                              background: 'rgba(168, 85, 247, 0.1)',
+                              fontSize: '0.68rem',
+                            }}
+                          >
+                            {k}:{v}
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
                     <div className="node-details">
                       <div className="node-meta-tags">
@@ -520,12 +609,184 @@ export const App: React.FC = () => {
         </div>
       )}
 
+      {/* Node Tag Management Modal (Admin only) */}
+      {tagModalAgent && (
+        <div className="modal-overlay" onClick={() => setTagModalAgent(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '480px' }}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div
+                  style={{
+                    width: '32px',
+                    height: '32px',
+                    borderRadius: '8px',
+                    background: 'rgba(168, 85, 247, 0.15)',
+                    color: '#c084fc',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Tag size={16} />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '1.05rem', fontWeight: 600 }}>Manage VM Tags</h3>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    {tagModalAgent.hostname} ({tagModalAgent.private_ip})
+                  </p>
+                </div>
+              </div>
+              <button className="tab-close" onClick={() => setTagModalAgent(null)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '6px' }}>
+                  Assigned Tags:
+                </label>
+                {Object.keys(editingTags).length === 0 ? (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', fontStyle: 'italic' }}>
+                    No tags assigned to this VM yet.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    {Object.entries(editingTags).map(([k, v]) => (
+                      <span
+                        key={k}
+                        className="meta-chip"
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          color: '#e9d5ff',
+                          borderColor: 'rgba(168, 85, 247, 0.4)',
+                          background: 'rgba(168, 85, 247, 0.15)',
+                          padding: '3px 8px',
+                          fontSize: '0.75rem',
+                        }}
+                      >
+                        <span>
+                          {k}:{v}
+                        </span>
+                        <X
+                          size={12}
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => {
+                            const next = { ...editingTags };
+                            delete next[k];
+                            setEditingTags(next);
+                          }}
+                        />
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'flex-end',
+                  background: 'var(--bg-primary)',
+                  padding: '10px',
+                  borderRadius: '8px',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <div style={{ flex: 1 }}>
+                  <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-dim)', marginBottom: '4px' }}>
+                    Tag Key
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. env"
+                    value={newTagKey}
+                    onChange={(e) => setNewTagKey(e.target.value)}
+                    style={{
+                      width: '100%',
+                      background: 'var(--bg-surface)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: '6px',
+                      padding: '6px 9px',
+                      color: 'var(--text-main)',
+                      fontSize: '0.8rem',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-dim)', marginBottom: '4px' }}>
+                    Tag Value
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. staging"
+                    value={newTagValue}
+                    onChange={(e) => setNewTagValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newTagKey.trim() && newTagValue.trim()) {
+                        e.preventDefault();
+                        setEditingTags((prev) => ({ ...prev, [newTagKey.trim()]: newTagValue.trim() }));
+                        setNewTagKey('');
+                        setNewTagValue('');
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      background: 'var(--bg-surface)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: '6px',
+                      padding: '6px 9px',
+                      color: 'var(--text-main)',
+                      fontSize: '0.8rem',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  style={{ height: '32px' }}
+                  onClick={() => {
+                    if (newTagKey.trim() && newTagValue.trim()) {
+                      setEditingTags((prev) => ({ ...prev, [newTagKey.trim()]: newTagValue.trim() }));
+                      setNewTagKey('');
+                      setNewTagValue('');
+                    }
+                  }}
+                >
+                  <Plus size={13} />
+                  <span>Add</span>
+                </button>
+              </div>
+            </div>
+
+            <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setTagModalAgent(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={isSavingTags}
+                onClick={handleSaveNodeTags}
+              >
+                <span>Save Tags</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Users & Team Modal (Admin only) */}
       <UsersModal
         isOpen={isUsersModalOpen}
         onClose={() => setIsUsersModalOpen(false)}
         authToken={authToken}
         currentUsername={currentUser}
+        agents={agents}
       />
 
       {/* Enroll Modal */}

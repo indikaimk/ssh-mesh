@@ -116,6 +116,8 @@ type Store interface {
 	ListTokens() ([]*EnrollmentToken, error)
 	ValidateToken(token string) bool
 	RevokeToken(id string) error
+	SetNodeTags(agentID string, tags map[string]string) error
+	GetNodeTags(agentID string) (map[string]string, error)
 	Close() error
 }
 
@@ -185,6 +187,11 @@ func (s *SQLiteStore) migrate() error {
 		created_at TEXT NOT NULL,
 		expires_at TEXT,
 		revoked INTEGER NOT NULL DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS node_tags (
+		agent_id TEXT PRIMARY KEY,
+		tags TEXT NOT NULL DEFAULT '{}'
 	);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
@@ -485,6 +492,45 @@ func (s *SQLiteStore) RevokeToken(id string) error {
 		return errors.New("token not found")
 	}
 	return nil
+}
+
+func (s *SQLiteStore) SetNodeTags(agentID string, tags map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	raw, err := json.Marshal(tags)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO node_tags (agent_id, tags) VALUES (?, ?)
+		ON CONFLICT(agent_id) DO UPDATE SET tags = excluded.tags
+	`, agentID, string(raw))
+	return err
+}
+
+func (s *SQLiteStore) GetNodeTags(agentID string) (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var raw string
+	err := s.db.Get(&raw, "SELECT tags FROM node_tags WHERE agent_id = ?", agentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var tags map[string]string
+	if err := json.Unmarshal([]byte(raw), &tags); err != nil {
+		return nil, err
+	}
+	return tags, nil
 }
 
 func (s *SQLiteStore) Close() error {

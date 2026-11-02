@@ -87,4 +87,16 @@ func TestStoreUserCRUDWithSqlx(t *testing.T) {
 	if updated.Role != "viewer" || updated.AllowedNodes != `["*"]` {
 		t.Fatalf("User update verification failed: %+v", updated)
 	}
+
+	// Set and get node tags
+	if err := st.SetNodeTags("vps-01", map[string]string{"env": "staging", "team": "backend"}); err != nil {
+		t.Fatalf("Failed to set node tags: %v", err)
+	}
+	tags, err := st.GetNodeTags("vps-01")
+	if err != nil {
+		t.Fatalf("Failed to get node tags: %v", err)
+	}
+	if tags["env"] != "staging" || tags["team"] != "backend" {
+		t.Fatalf("Unexpected node tags: %+v", tags)
+	}
 }

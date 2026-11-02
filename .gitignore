@@ -29,10 +29,13 @@ yarn-error.log*
 *.db
 *.db-journal
 *.db-wal
+*.db-shm
 data/
 
 # IDE / Editor
 .vscode/
+*.code-workspace
+*.tsbuildinfo
 .idea/
 *.swp
 *.swo

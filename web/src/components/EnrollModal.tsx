@@ -18,6 +18,7 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
   const [activeTab, setActiveTab] = useState<'install' | 'tokens'>('install');
   const [tokens, setTokens] = useState<EnrollmentToken[]>([]);
   const [selectedToken, setSelectedToken] = useState(defaultToken);
+  const [nodeTags, setNodeTags] = useState('');
   const [copiedCurl, setCopiedCurl] = useState(false);
   const [copiedBinary, setCopiedBinary] = useState(false);
 
@@ -58,9 +59,14 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
   const httpScheme = isHttps ? 'https' : 'http';
   const wsScheme = isHttps ? 'wss' : 'ws';
 
-  const tokenParam = selectedToken ? `?token=${encodeURIComponent(selectedToken)}` : '';
-  const curlCmd = `curl -sSL ${httpScheme}://${host}/api/v1/install-script${tokenParam} | sudo bash`;
-  const binaryCmd = `chmod +x ssh-mesh-agent-* && ./ssh-mesh-agent-* -server ${wsScheme}://${host}/api/v1/agent/tunnel -token ${selectedToken || defaultToken}`;
+  const queryParts: string[] = [];
+  if (selectedToken) queryParts.push(`token=${encodeURIComponent(selectedToken)}`);
+  if (nodeTags.trim()) queryParts.push(`tags=${encodeURIComponent(nodeTags.trim())}`);
+  const queryStr = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+
+  const tagsFlag = nodeTags.trim() ? ` -tags "${nodeTags.trim()}"` : '';
+  const curlCmd = `curl -sSL "${httpScheme}://${host}/api/v1/install-script${queryStr}" | sudo bash`;
+  const binaryCmd = `chmod +x ssh-mesh-agent-* && ./ssh-mesh-agent-* -server ${wsScheme}://${host}/api/v1/agent/tunnel -token ${selectedToken || defaultToken}${tagsFlag}`;
 
   const handleCopy = (text: string, type: 'curl' | 'binary') => {
     navigator.clipboard.writeText(text);
@@ -208,6 +214,28 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
                 </select>
               </div>
             )}
+
+            <div>
+              <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>
+                Assign Node Tags (Optional, for RBAC access control):
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. env=staging, team=backend"
+                value={nodeTags}
+                onChange={(e) => setNodeTags(e.target.value)}
+                style={{
+                  background: 'var(--bg-surface)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: '8px',
+                  padding: '8px 12px',
+                  color: 'var(--text-main)',
+                  fontSize: '0.85rem',
+                  width: '100%',
+                  outline: 'none',
+                }}
+              />
+            </div>
 
             <div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>

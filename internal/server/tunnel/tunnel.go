@@ -83,13 +83,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer session.Close()
 
+	mergedTags := reg.Tags
+	if h.authMgr != nil && h.authMgr.GetStore() != nil {
+		if storedTags, err := h.authMgr.GetStore().GetNodeTags(reg.ID); err == nil && storedTags != nil {
+			mergedTags = storedTags
+		} else if len(reg.Tags) > 0 {
+			_ = h.authMgr.GetStore().SetNodeTags(reg.ID, reg.Tags)
+		}
+	}
+
 	agentInfo := &protocol.AgentInfo{
 		ID:        reg.ID,
 		Hostname:  reg.Hostname,
 		OS:        reg.OS,
 		Arch:      reg.Arch,
 		PrivateIP: reg.PrivateIP,
-		Tags:      reg.Tags,
+		Tags:      mergedTags,
 		Version:   reg.Version,
 		Status:    "online",
 	}

@@ -26,6 +26,7 @@ type Broker interface {
 	List() []*protocol.AgentInfo
 	DialStream(ctx context.Context, agentID string) (net.Conn, error)
 	UpdateHeartbeat(agentID string)
+	UpdateTags(agentID string, tags map[string]string) error
 }
 
 type agentEntry struct {
@@ -79,6 +80,18 @@ func (b *MemoryBroker) Unregister(agentID string) {
 	}
 }
 
+func copyAgentInfo(src *protocol.AgentInfo) *protocol.AgentInfo {
+	infoCopy := *src
+	if src.Tags != nil {
+		tagsCopy := make(map[string]string, len(src.Tags))
+		for k, v := range src.Tags {
+			tagsCopy[k] = v
+		}
+		infoCopy.Tags = tagsCopy
+	}
+	return &infoCopy
+}
+
 func (b *MemoryBroker) Get(agentID string) (*protocol.AgentInfo, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -87,9 +100,7 @@ func (b *MemoryBroker) Get(agentID string) (*protocol.AgentInfo, error) {
 	if !exists {
 		return nil, ErrAgentNotFound
 	}
-	// Return a copy to avoid race conditions
-	infoCopy := *entry.info
-	return &infoCopy, nil
+	return copyAgentInfo(entry.info), nil
 }
 
 func (b *MemoryBroker) List() []*protocol.AgentInfo {
@@ -98,8 +109,7 @@ func (b *MemoryBroker) List() []*protocol.AgentInfo {
 
 	list := make([]*protocol.AgentInfo, 0, len(b.agents))
 	for _, entry := range b.agents {
-		infoCopy := *entry.info
-		list = append(list, &infoCopy)
+		list = append(list, copyAgentInfo(entry.info))
 	}
 	return list
 }
@@ -111,6 +121,22 @@ func (b *MemoryBroker) UpdateHeartbeat(agentID string) {
 	if entry, exists := b.agents[agentID]; exists {
 		entry.info.LastSeenAt = time.Now()
 	}
+}
+
+func (b *MemoryBroker) UpdateTags(agentID string, tags map[string]string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	entry, exists := b.agents[agentID]
+	if !exists {
+		return ErrAgentNotFound
+	}
+	tagsCopy := make(map[string]string, len(tags))
+	for k, v := range tags {
+		tagsCopy[k] = v
+	}
+	entry.info.Tags = tagsCopy
+	return nil
 }
 
 func (b *MemoryBroker) DialStream(ctx context.Context, agentID string) (net.Conn, error) {
